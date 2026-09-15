@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "colgov"
+version = "0.0.1"
+description = "Deterministic, reversible tokenization and fail-closed access policy for tabular PII."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = [
+    "pii",
+    "privacy",
+    "tokenization",
+    "anonymization",
+    "data-governance",
+    "aes-siv",
+    "deterministic-encryption",
+    "column-level-security",
+]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/chowkuanlaw/colgov"
+Repository = "https://github.com/chowkuanlaw/colgov"
+Issues = "https://github.com/chowkuanlaw/colgov/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/colgov"]
