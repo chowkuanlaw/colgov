@@ -11,3 +11,6 @@ venv/
 .mypy_cache/
 .coverage
 htmlcov/
+
+# local helper, machine-specific paths
+upload.ps1
