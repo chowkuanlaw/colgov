@@ -6,8 +6,8 @@ Tokenize a column and it stays joinable. Same plaintext, same token — every
 time, across tables and across runs — so `JOIN`, `GROUP BY` and
 `COUNT(DISTINCT)` keep working on data nobody can read.
 
-> **Status: pre-release (`0.1.0.dev0`).** Every v0.1 feature is in place. The API may still change before
-> `v0.1.0`.
+> **Status: alpha (`0.1.0`).** Every v0.1 feature is in place. The API may
+> still change before 1.0. See [CHANGELOG.md](CHANGELOG.md).
 
 ## The problem
 

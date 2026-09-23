@@ -17,7 +17,7 @@ from colgov.risk import (
 from colgov.rules import PUBLIC, Label, Rule, RulePack, RulePackError, Suggestion
 from colgov.tokenization import MIN_MASTER_KEY_BYTES, InvalidToken, Tokenizer
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 __all__ = [
     "__version__",
     "DEFAULT_MIN_DISTINCT",
