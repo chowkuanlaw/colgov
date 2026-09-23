@@ -11,11 +11,14 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+from collections.abc import Iterable
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESSIV
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+from colgov.risk import DEFAULT_MIN_DISTINCT, LowCardinalityError, column_risk
 
 __all__ = ["InvalidToken", "Tokenizer", "MIN_MASTER_KEY_BYTES"]
 
@@ -80,6 +83,27 @@ class Tokenizer:
             raise TypeError(f"value must be str or None, got {type(value).__name__}")
         ciphertext = self._cipher(column).encrypt(_FORMAT_V1 + value.encode("utf-8"), None)
         return base64.urlsafe_b64encode(ciphertext).rstrip(b"=").decode("ascii")
+
+    def tokenize_column(
+        self,
+        values: Iterable[str | None],
+        *,
+        column: str,
+        min_distinct: int = DEFAULT_MIN_DISTINCT,
+        allow_low_cardinality: bool = False,
+    ) -> list[str | None]:
+        """Tokenize a whole column, refusing if it is too predictable.
+
+        Raises :class:`~colgov.LowCardinalityError` when the column has fewer
+        than ``min_distinct`` distinct non-null values, unless
+        ``allow_low_cardinality`` is set. Nothing is tokenized on refusal.
+        """
+        values = list(values)
+        if not allow_low_cardinality:
+            risk = column_risk(values)
+            if risk.is_low_cardinality(min_distinct):
+                raise LowCardinalityError(column, risk, min_distinct)
+        return [self.tokenize(v, column=column) for v in values]
 
     def detokenize(self, token: str | None, *, column: str) -> str | None:
         """Recover the plaintext of a token produced by :meth:`tokenize`."""

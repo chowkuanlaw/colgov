@@ -6,7 +6,7 @@ Tokenize a column and it stays joinable. Same plaintext, same token — every
 time, across tables and across runs — so `JOIN`, `GROUP BY` and
 `COUNT(DISTINCT)` keep working on data nobody can read.
 
-> **Status: pre-release (`0.1.0.dev0`).** Deterministic tokenization works
+> **Status: pre-release (`0.1.0.dev0`).** Tokenization and risk scoring work
 > today; the rest of v0.1 is in progress. The API may still change before
 > `v0.1.0`.
 
@@ -68,13 +68,43 @@ t.tokenize(None, column="email")      # None — NULL stays NULL
 - **Lose the master key and the tokens can't be reversed.** Anyone who has
   the key can reverse every token.
 
+### Refusing columns too predictable to protect
+
+`tokenize_column` profiles a column before it tokenizes anything. If the
+column has fewer than 10 distinct non-null values, it raises
+`LowCardinalityError` and tokenizes nothing:
+
+```python
+t.tokenize_column(["M", "F", "F", None], column="gender")
+# LowCardinalityError: column 'gender' has 2 distinct values (minimum 10) ...
+
+t.tokenize_column(values, column="gender", min_distinct=3)             # adjust the threshold
+t.tokenize_column(values, column="gender", allow_low_cardinality=True) # opt out explicitly
+```
+
+### Measuring re-identification risk
+
+```python
+from colgov import column_risk, k_anonymity
+
+column_risk(["a", "a", "a", "b", None])
+# ColumnRisk(n_rows=5, n_null=1, n_distinct=2, min_frequency=1, top_share=0.75)
+
+result = k_anonymity(rows, quasi_identifiers=["birth_year", "postcode", "gender"])
+result.k               # size of the smallest group of rows sharing all three values
+result.rows_below(5)   # how many rows sit in groups smaller than 5
+```
+
+`k == 1` means at least one person is unique on those columns and can be
+singled out, even when every column is tokenized.
+
 ## Planned for v0.1
 
 - [x] Deterministic reversible tokenization with per-column key derivation (HKDF)
 - [ ] Column classification from portable YAML rule packs
 - [ ] Human review workflow — a machine suggests, a person decides
 - [ ] Fail-closed policy resolution: an unclassified column is never visible
-- [ ] Re-identification risk scoring (cardinality, k-anonymity)
+- [x] Re-identification risk scoring (cardinality, k-anonymity)
 
 ## Scope
 
