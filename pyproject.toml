@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "colgov"
-version = "0.0.1"
+version = "0.1.0.dev0"
 description = "Deterministic, reversible tokenization and fail-closed access policy for tabular PII."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,7 +33,14 @@ classifiers = [
     "Topic :: Database",
     "Typing :: Typed",
 ]
-dependencies = []
+dependencies = [
+    "cryptography>=41",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7",
+]
 
 [project.urls]
 Homepage = "https://github.com/chowkuanlaw/colgov"
@@ -42,3 +49,7 @@ Issues = "https://github.com/chowkuanlaw/colgov/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/colgov"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "src"]
+addopts = "--doctest-modules"
