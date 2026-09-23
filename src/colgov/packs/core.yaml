@@ -1,0 +1,96 @@
+# colgov core rule pack: common personal data in tabular columns.
+#
+# Rules only suggest labels; a person confirms or overrides every one.
+# Name rules use regex search on the column name (case-insensitive).
+# Value rules must match whole values in at least min_match_ratio of the
+# sampled non-null values.
+
+pack: core
+version: 1
+description: Common personal data found in tabular columns.
+
+labels:
+  email:
+    description: Email address
+  phone_number:
+    description: Telephone or mobile number
+  person_name:
+    description: A person's full, given or family name
+  national_id:
+    description: Government-issued identifier (national ID, passport, tax ID)
+  date_of_birth:
+    description: Date of birth
+  postal_code:
+    description: Postal or ZIP code
+  street_address:
+    description: Street or mailing address
+  ip_address:
+    description: IP address
+  payment_card:
+    description: Payment card number
+
+rules:
+  - id: email-name
+    label: email
+    column_name: 'e_?mail'
+    confidence: 0.7
+  - id: email-value
+    label: email
+    value_pattern: '[^@\s]+@[^@\s]+\.[A-Za-z]{2,}'
+    min_match_ratio: 0.9
+    confidence: 0.95
+
+  - id: phone-name
+    label: phone_number
+    column_name: 'phone|mobile|msisdn|(^|_)(tel|fax)(_|$)'
+    confidence: 0.7
+  - id: phone-value
+    label: phone_number
+    value_pattern: '\+?[0-9][0-9 ()-]{6,18}[0-9]'
+    min_match_ratio: 0.9
+    confidence: 0.5
+
+  - id: person-name-name
+    label: person_name
+    column_name: '(first|last|middle|full|given|family|sur|customer|person|contact)_?name|^name$'
+    confidence: 0.7
+
+  - id: national-id-name
+    label: national_id
+    column_name: 'national_?id|nric|ssn|passport|tax_?id|(^|_)ic_?(no|num|number)(_|$)'
+    confidence: 0.8
+
+  - id: dob-name
+    label: date_of_birth
+    column_name: '(^|_)dob(_|$)|date_?of_?birth|birth_?date|birthday'
+    confidence: 0.8
+
+  - id: postal-code-name
+    label: postal_code
+    column_name: 'post_?code|postal_?code|(^|_)zip(_?code)?$'
+    confidence: 0.7
+
+  - id: street-address-name
+    label: street_address
+    column_name: '^(?!.*(mail|ip)).*(address|street|addr_?line)'
+    confidence: 0.6
+
+  - id: ip-name
+    label: ip_address
+    column_name: 'ip_?addr|(^|_)ip(_|$)'
+    confidence: 0.7
+  - id: ip-value
+    label: ip_address
+    value_pattern: '((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])'
+    min_match_ratio: 0.9
+    confidence: 0.9
+
+  - id: payment-card-name
+    label: payment_card
+    column_name: 'card_?(no|num|number)|(^|_)pan(_|$)|cc_?num'
+    confidence: 0.7
+  - id: payment-card-value
+    label: payment_card
+    value_pattern: '[0-9]{4}([ -]?[0-9]{4}){3}'
+    min_match_ratio: 0.9
+    confidence: 0.7

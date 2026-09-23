@@ -6,8 +6,7 @@ Tokenize a column and it stays joinable. Same plaintext, same token — every
 time, across tables and across runs — so `JOIN`, `GROUP BY` and
 `COUNT(DISTINCT)` keep working on data nobody can read.
 
-> **Status: pre-release (`0.1.0.dev0`).** Tokenization and risk scoring work
-> today; the rest of v0.1 is in progress. The API may still change before
+> **Status: pre-release (`0.1.0.dev0`).** Every v0.1 feature is in place. The API may still change before
 > `v0.1.0`.
 
 ## The problem
@@ -98,12 +97,90 @@ result.rows_below(5)   # how many rows sit in groups smaller than 5
 `k == 1` means at least one person is unique on those columns and can be
 singled out, even when every column is tokenized.
 
+### Classify, review, then govern
+
+The full workflow has three steps: a rule pack **suggests** labels, a person
+**decides**, and a policy **resolves** what each role sees.
+
+```python
+from colgov import PUBLIC, Catalog, Policy, RulePack, Tokenizer
+
+table = {
+    "customer_email": [...],
+    "mobile_no": [...],
+    "order_total": [...],
+    "comments": [...],
+}
+
+# 1. Suggest: rule packs match column names and sampled values.
+suggestions = RulePack.builtin("core").classify(table)
+suggestions["customer_email"][0]
+# Suggestion(column='customer_email', label='email', confidence=0.95,
+#            rule_ids=('email-name', 'email-value'), ...)
+
+# 2. Decide: only a named person turns a suggestion into a decision.
+catalog = Catalog()
+catalog.accept(suggestions["customer_email"][0], by="alice")
+catalog.accept(suggestions["mobile_no"][0], by="alice")
+catalog.decide("order_total", PUBLIC, by="alice", note="no personal data")
+catalog.pending(table)     # ['comments']  — not reviewed yet
+catalog.save("catalog.yaml")  # commit it; review decisions like code
+
+# 3. Resolve: a fail-closed policy per role.
+policy = Policy.from_yaml("""
+roles:
+  analyst:
+    email: tokenize
+    phone_number: deny
+""")
+view = policy.apply(table, role="analyst", catalog=catalog, tokenizer=Tokenizer(key))
+list(view)                 # ['customer_email', 'order_total']
+```
+
+Policies fail closed at every step:
+
+- **An unknown role sees nothing.**
+- **A column nobody has reviewed is denied,** whatever the machine suggested.
+- **A label the role isn't granted is denied.** That includes misspelt labels.
+- **Tokenized columns still go through the cardinality check,** so a
+  predictable column raises `LowCardinalityError` instead of leaking.
+
+Treatments are `clear`, `tokenize` and `deny`. Columns reviewed as `public`
+are `clear` unless a role overrides it. Use `policy.plan(role, columns,
+catalog)` to see each column's treatment and the reason for it.
+
+### Writing a rule pack
+
+```yaml
+pack: my-org
+version: 1
+labels:
+  employee_id:
+    description: Internal staff number
+rules:
+  - id: employee-id-name
+    label: employee_id
+    column_name: 'emp(loyee)?_?(id|no)'   # regex, case-insensitive, searched in the name
+    confidence: 0.8
+  - id: employee-id-value
+    label: employee_id
+    value_pattern: 'E[0-9]{6}'           # regex, must match the whole value
+    min_match_ratio: 0.9                 # share of sampled non-null values (default 0.8)
+    confidence: 0.9
+```
+
+Load it with `RulePack.load("my-org.yaml")`. Packs are validated strictly:
+unknown keys, undeclared labels, invalid regexes and duplicate rule ids are
+all rejected when the pack loads. The built-in `core` pack covers email,
+phone numbers, names, national IDs, dates of birth, postal codes, street
+addresses, IP addresses and payment cards.
+
 ## Planned for v0.1
 
 - [x] Deterministic reversible tokenization with per-column key derivation (HKDF)
-- [ ] Column classification from portable YAML rule packs
-- [ ] Human review workflow — a machine suggests, a person decides
-- [ ] Fail-closed policy resolution: an unclassified column is never visible
+- [x] Column classification from portable YAML rule packs
+- [x] Human review workflow — a machine suggests, a person decides
+- [x] Fail-closed policy resolution: an unclassified column is never visible
 - [x] Re-identification risk scoring (cardinality, k-anonymity)
 
 ## Scope
