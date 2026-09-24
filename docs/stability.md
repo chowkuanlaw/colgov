@@ -4,11 +4,6 @@ From 1.0.0, colgov follows [Semantic Versioning](https://semver.org). This
 page defines what counts as the public API that promise covers. Before
 1.0, minor releases could break it, and the changelog says how to upgrade.
 
-**Release candidates.** The public API and formats below are frozen as of
-`1.0.0rc1`. Between a release candidate and 1.0.0, only bug fixes and
-security fixes go in. If a fix has to change something public, it goes
-into another release candidate and the changelog calls it out.
-
 ## Public
 
 - **Package names:** everything listed in `__all__` of `colgov`,

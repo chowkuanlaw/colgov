@@ -24,10 +24,10 @@ named.
 
 | Version | Supported |
 |---|---|
-| Latest minor release | Yes |
-| Anything older | No: please upgrade |
+| 1.x, latest minor release | Yes |
+| 0.x and release candidates | No: please upgrade to 1.x |
 
-Before 1.0.0, including release candidates, fixes go into the next release only.
+Security fixes go into a patch release of the latest 1.x minor release.
 
 ## Scope
 
