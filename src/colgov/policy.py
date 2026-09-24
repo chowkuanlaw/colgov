@@ -40,7 +40,7 @@ import yaml
 
 from colgov.audit import AuditLog, record_event
 from colgov.review import Catalog, Decision
-from colgov.risk import DEFAULT_MIN_DISTINCT
+from colgov.risk import DEFAULT_MIN_DISTINCT, LowCardinalityError
 from colgov.rules import PUBLIC
 from colgov.tokenization import InvalidToken, Tokenizer
 
@@ -289,10 +289,18 @@ class Policy:
             elif r.treatment is Treatment.TOKENIZE:
                 if tokenizer is None:  # unreachable: checked above, kept fail-closed
                     raise PolicyError(f"role {role!r} needs a tokenizer to view this table")
-                view[r.column] = tokenizer.tokenize_column(
-                    data[r.column], column=r.domain or r.column, min_distinct=min_distinct
-                )
+                view[r.column] = _tokenize_column(tokenizer, data[r.column], r, min_distinct)
         return view
+
+
+def _tokenize_column(
+    tokenizer: Tokenizer, values: Iterable[str | None], r: Resolution, min_distinct: int
+) -> list[str | None]:
+    """Tokenize ``r``'s column in its domain, naming the column (not the domain) on refusal."""
+    try:
+        return tokenizer.tokenize_column(values, column=r.domain or r.column, min_distinct=min_distinct)
+    except LowCardinalityError as exc:
+        raise LowCardinalityError(r.column, exc.risk, exc.min_distinct) from None
 
 
 def summarize(plan: Iterable[Resolution]) -> str:

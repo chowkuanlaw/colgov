@@ -74,6 +74,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return status
     except CliError as exc:
         print(f"colgov: error: {exc}", file=sys.stderr)
+    except LowCardinalityError as exc:
+        hint = f"To tokenize it anyway, pass --min-distinct {exc.risk.n_distinct}."
+        print(f"colgov: error: {exc} {hint}", file=sys.stderr)
     except _ERRORS as exc:
         print(f"colgov: error: {exc}", file=sys.stderr)
     except KeyboardInterrupt:

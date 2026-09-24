@@ -133,6 +133,16 @@ def test_apply_refuses_low_cardinality_tokenization(policy, tokenizer):
     assert len(view["email"]) == 12
 
 
+def test_low_cardinality_error_names_the_column_not_its_domain(policy, tokenizer):
+    cat = Catalog()
+    cat.decide("email", "email", by="alice", domain="person_email")
+    with pytest.raises(LowCardinalityError) as exc_info:
+        policy.apply({"email": ["a@x.com", "b@x.com"] * 6}, role="analyst", catalog=cat, tokenizer=tokenizer)
+    assert exc_info.value.column == "email"
+    assert "'email'" in str(exc_info.value) and "person_email" not in str(exc_info.value)
+    assert "allow_low_cardinality" not in str(exc_info.value)
+
+
 def test_apply_accepts_iterators(policy, catalog, tokenizer):
     table = {k: iter(v) for k, v in TABLE.items()}
     view = policy.apply(table, role="analyst", catalog=catalog, tokenizer=tokenizer)

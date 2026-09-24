@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.0.0rc1 — 2026-09-24
+
+First release candidate for 1.0.0. The public API and file formats listed
+in the [stability policy](https://chowkuanlaw.github.io/colgov/stability/) are now frozen: from here to
+1.0.0, only bug fixes and security fixes go in. There are no API or format
+changes from 0.3.0, so tokens, catalogs, policies, keyrings and audit logs
+from 0.3.0 work unchanged.
+
+Install it with `pip install --pre colgov` or `pip install colgov==1.0.0rc1`.
+
+### Fixed
+
+- **Low-cardinality errors named a setting that didn't apply.** The
+  message always said to pass `allow_low_cardinality=True`, which exists
+  only on `Tokenizer.tokenize_column`. The message now gives advice that
+  holds everywhere. The CLI adds the exact `--min-distinct` value that
+  would let the column through.
+- **Low-cardinality errors named the token domain instead of the column.**
+  `Policy.apply` and `colgov.pandas.apply` reported the column's `domain`
+  (for example `person_email`) instead of its name when refusing a column
+  with a domain. `LowCardinalityError.column` is now the column's name.
+
+### Changed
+
+- **Development status** on PyPI is now "Beta".
+
 ## 0.3.0 — 2026-09-24
 
 Stored tokens and policies need a small migration. See **Upgrading from

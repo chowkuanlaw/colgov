@@ -87,6 +87,15 @@ def test_apply_refuses_low_cardinality(policy, catalog, tok):
         cpd.apply(df, policy, role="analyst", catalog=catalog, tokenizer=tok)
 
 
+def test_low_cardinality_error_names_the_column_not_its_domain(policy, tok):
+    cat = Catalog()
+    cat.decide("customer_email", "email", by="alice", domain="person_email")
+    df = pd.DataFrame({"customer_email": ["a@x.com", "b@x.com"] * 6})
+    with pytest.raises(LowCardinalityError) as exc_info:
+        cpd.apply(df, policy, role="analyst", catalog=cat, tokenizer=tok)
+    assert exc_info.value.column == "customer_email"
+
+
 def test_apply_non_string_tokenized_column_rejected(policy, tok):
     cat = Catalog()
     cat.decide("id", "email", by="alice")

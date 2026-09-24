@@ -21,6 +21,7 @@ from colgov.policy import (
     Resolution,
     Treatment,
     _require_text,
+    _tokenize_column,
     record_view,
     summarize,
 )
@@ -92,9 +93,7 @@ def _build(
         if r.treatment is Treatment.CLEAR:
             out[r.column] = df[r.column]
         elif r.treatment is Treatment.TOKENIZE:
-            tokens = tokenizer.tokenize_column(  # type: ignore[union-attr]
-                _values(df[r.column]), column=r.domain or r.column, min_distinct=min_distinct
-            )
+            tokens = _tokenize_column(tokenizer, _values(df[r.column]), r, min_distinct)  # type: ignore[arg-type]
             out[r.column] = pd.Series(tokens, index=df.index, dtype=object)
     return out
 
