@@ -121,3 +121,13 @@ def test_apply_audit(sdf, policy, catalog, tok):
     assert event.columns == ("customer_email", "amount")
     with pytest.raises(PolicyError, match="actor"):
         cspark.apply(sdf, policy, role="analyst", catalog=catalog, tokenizer=tok, audit=audit)
+
+
+def test_apply_uses_table_and_domain(spark, tok):
+    cat = Catalog()
+    cat.decide("buyer_email", "email", by="alice", table="orders", domain="email")
+    sdf = spark.createDataFrame([(f"u{i}@x.com",) for i in range(12)], "buyer_email string")
+    policy = Policy({"a": {"email": "tokenize"}})
+    out = cspark.apply(sdf, policy, role="a", catalog=cat, table="orders", tokenizer=tok)
+    assert out.first()[0] == tok.tokenize("u0@x.com", column="email")
+    assert cspark.apply(sdf, policy, role="a", catalog=cat, tokenizer=tok).columns == []

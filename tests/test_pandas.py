@@ -39,7 +39,7 @@ def catalog():
 
 @pytest.fixture
 def policy():
-    return Policy({"analyst": {"email": "tokenize"}, "support": {"email": "clear"}})
+    return Policy({"analyst": {"email": "tokenize"}, "support": {"email": {"view": "clear", "detokenize": True}}})
 
 
 @pytest.fixture
@@ -154,3 +154,15 @@ def test_detokenize_needs_column_name(policy, catalog, tok):
     with pytest.raises(ValueError, match="column"):
         cpd.detokenize(pd.Series(["x"]), policy, role="support", catalog=catalog, tokenizer=tok,
                        actor="a", purpose="b", audit=MemoryAuditLog())
+
+
+def test_apply_and_detokenize_with_table_and_domain(tok):
+    cat = Catalog()
+    cat.decide("buyer_email", "email", by="alice", table="orders", domain="email")
+    policy = Policy({"fraud": {"email": {"view": "tokenize", "detokenize": True}}})
+    df = pd.DataFrame({"buyer_email": [f"u{i}@x.com" for i in range(12)]})
+    out = cpd.apply(df, policy, role="fraud", catalog=cat, table="orders", tokenizer=tok)
+    assert out["buyer_email"].iloc[0] == tok.tokenize("u0@x.com", column="email")
+    back = cpd.detokenize(out["buyer_email"], policy, role="fraud", catalog=cat, table="orders",
+                          tokenizer=tok, actor="c", purpose="p", audit=MemoryAuditLog())
+    assert back.tolist() == df["buyer_email"].tolist()

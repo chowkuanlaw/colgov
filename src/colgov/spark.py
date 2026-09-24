@@ -59,6 +59,7 @@ def apply(
     *,
     role: str,
     catalog: Catalog,
+    table: str | None = None,
     tokenizer: Tokenizer | None = None,
     min_distinct: int = DEFAULT_MIN_DISTINCT,
     audit: AuditLog | None = None,
@@ -79,7 +80,7 @@ def apply(
         raise ValueError("column names must be unique")
     if audit is not None:
         _require_text(actor, "actor")
-    plan = policy.plan(role, sdf.columns, catalog)
+    plan = policy.plan(role, sdf.columns, catalog, table=table)
     try:
         out = _build(sdf, plan, role, tokenizer, min_distinct)
     except Exception as exc:
@@ -114,7 +115,8 @@ def _build(
         if r.treatment is Treatment.CLEAR:
             selected.append(F.col(_quote(r.column)))
         elif r.treatment is Treatment.TOKENIZE:
-            selected.append(_tokenize_udf(tokenizer, r.column)(F.col(_quote(r.column))).alias(r.column))  # type: ignore[arg-type]
+            udf = _tokenize_udf(tokenizer, r.domain or r.column)  # type: ignore[arg-type]
+            selected.append(udf(F.col(_quote(r.column))).alias(r.column))
     return sdf.select(*selected)
 
 

@@ -9,6 +9,8 @@ gets::
         postal_code: clear
       support:
         email: clear
+      fraud:
+        email: {view: tokenize, detokenize: true}
 
 Treatments are ``clear`` (plaintext), ``tokenize`` (deterministic token) and
 ``deny`` (column removed). Resolution fails closed at every step:
@@ -19,9 +21,11 @@ Treatments are ``clear`` (plaintext), ``tokenize`` (deterministic token) and
 4. columns reviewed as :data:`colgov.PUBLIC` are ``clear`` unless the role
    says otherwise.
 
-Detokenization follows the same rules: a role may turn tokens back into
-plaintext only for columns it could already see in ``clear``. Every attempt
-is written to an audit log before any plaintext is returned.
+Detokenizing is a separate right that must be granted explicitly with the
+long form ``{view: ..., detokenize: true}``; seeing a column in ``clear``
+does not imply it. It follows the same fail-closed steps (known role,
+reviewed column, granted label), and every attempt is written to an audit
+log before any plaintext is returned.
 """
 
 from __future__ import annotations
@@ -35,12 +39,12 @@ from typing import Any
 import yaml
 
 from colgov.audit import AuditLog, record_event
-from colgov.review import Catalog
+from colgov.review import Catalog, Decision
 from colgov.risk import DEFAULT_MIN_DISTINCT
 from colgov.rules import PUBLIC
 from colgov.tokenization import InvalidToken, Tokenizer
 
-__all__ = ["AccessDenied", "Policy", "PolicyError", "Resolution", "Treatment"]
+__all__ = ["AccessDenied", "Grant", "Policy", "PolicyError", "Resolution", "Treatment"]
 
 
 class Treatment(str, Enum):
@@ -58,35 +62,44 @@ class AccessDenied(PolicyError):
 
 
 @dataclass(frozen=True)
+class Grant:
+    """What a role may do with one label."""
+
+    view: Treatment = Treatment.DENY
+    detokenize: bool = False
+
+
+_GRANT_KEYS = {"view", "detokenize"}
+
+
+@dataclass(frozen=True)
 class Resolution:
-    """How one column is shown to one role, and why."""
+    """How one column is shown to one role, and why.
+
+    ``domain`` is the token domain to use when ``treatment`` is tokenize.
+    """
 
     column: str
     treatment: Treatment
     reason: str
     label: str | None = None
+    table: str | None = None
+    domain: str | None = None
 
 
 class Policy:
-    def __init__(self, roles: Mapping[str, Mapping[str, Treatment | str]]) -> None:
-        self._roles: dict[str, dict[str, Treatment]] = {}
+    def __init__(self, roles: Mapping[str, Mapping[str, Grant | Treatment | str | Mapping[str, Any]]]) -> None:
+        self._roles: dict[str, dict[str, Grant]] = {}
         for role, grants in roles.items():
             if not isinstance(role, str) or not role:
                 raise PolicyError("role names must be non-empty strings")
             if not isinstance(grants, Mapping):
                 raise PolicyError(f"role {role!r}: must map labels to treatments")
-            parsed: dict[str, Treatment] = {}
-            for label, treatment in grants.items():
+            parsed: dict[str, Grant] = {}
+            for label, spec in grants.items():
                 if not isinstance(label, str) or not label:
                     raise PolicyError(f"role {role!r}: labels must be non-empty strings")
-                try:
-                    parsed[label] = Treatment(treatment)
-                except ValueError:
-                    allowed = ", ".join(t.value for t in Treatment)
-                    raise PolicyError(
-                        f"role {role!r}, label {label!r}: unknown treatment "
-                        f"{treatment!r} (expected one of: {allowed})"
-                    ) from None
+                parsed[label] = _parse_grant(spec, f"role {role!r}, label {label!r}")
             self._roles[role] = parsed
 
     @property
@@ -119,53 +132,88 @@ class Policy:
 
     # --- resolution ---------------------------------------------------------
 
-    def resolve(self, role: str, column: str, catalog: Catalog) -> Resolution:
-        """Decide how ``column`` is shown to ``role``. Anything unclear is denied."""
+    def resolve(
+        self, role: str, column: str, catalog: Catalog, *, table: str | None = None
+    ) -> Resolution:
+        """Decide how ``column`` (of ``table``) is shown to ``role``.
+
+        Anything unclear is denied.
+        """
+        found = self._lookup(role, column, catalog, table)
+        if isinstance(found, Resolution):
+            return found
+        grant, decision = found
+        label = decision.label
+        if label == PUBLIC and label not in self._roles[role]:
+            reason = "column was reviewed as public"
+        else:
+            reason = f"role {role!r} grants {grant.view.value} on {label!r}"
+        return Resolution(column, grant.view, reason, label, table, decision.token_domain)
+
+    def plan(
+        self, role: str, columns: Iterable[str], catalog: Catalog, *, table: str | None = None
+    ) -> list[Resolution]:
+        """Resolve every column in ``columns`` for ``role``."""
+        return [self.resolve(role, c, catalog, table=table) for c in columns]
+
+    def may_detokenize(
+        self, role: str, column: str, catalog: Catalog, *, table: str | None = None
+    ) -> tuple[bool, str]:
+        """Whether ``role`` may detokenize ``column``, and why (or why not)."""
+        found = self._lookup(role, column, catalog, table)
+        if isinstance(found, Resolution):
+            return False, found.reason
+        grant, decision = found
+        label = decision.label
+        if not grant.detokenize:
+            return False, f"role {role!r} has no detokenize grant for {label!r}"
+        return True, f"role {role!r} may detokenize {label!r}"
+
+    def _lookup(
+        self, role: str, column: str, catalog: Catalog, table: str | None
+    ) -> tuple[Grant, Decision] | Resolution:
+        """The role's grant and the column's decision, or a denying Resolution."""
         grants = self._roles.get(role)
         if grants is None:
-            return Resolution(column, Treatment.DENY, f"unknown role {role!r}")
-        decision = catalog.get(column)
+            return Resolution(column, Treatment.DENY, f"unknown role {role!r}", table=table)
+        decision = catalog.get(column, table=table)
         if decision is None:
-            return Resolution(column, Treatment.DENY, "column has not been reviewed")
+            return Resolution(column, Treatment.DENY, "column has not been reviewed", table=table)
         label = decision.label
         if label in grants:
-            return Resolution(
-                column, grants[label], f"role {role!r} grants {grants[label].value} on {label!r}", label
-            )
+            return grants[label], decision
         if label == PUBLIC:
-            return Resolution(column, Treatment.CLEAR, "column was reviewed as public", label)
-        return Resolution(column, Treatment.DENY, f"role {role!r} has no grant for {label!r}", label)
-
-    def plan(self, role: str, columns: Iterable[str], catalog: Catalog) -> list[Resolution]:
-        """Resolve every column in ``columns`` for ``role``."""
-        return [self.resolve(role, c, catalog) for c in columns]
+            return Grant(view=Treatment.CLEAR), decision
+        return Resolution(column, Treatment.DENY, f"role {role!r} has no grant for {label!r}", label, table)
 
     def apply(
         self,
-        table: Mapping[str, Iterable[Any]],
+        data: Mapping[str, Iterable[Any]],
         *,
         role: str,
         catalog: Catalog,
+        table: str | None = None,
         tokenizer: Tokenizer | None = None,
         min_distinct: int = DEFAULT_MIN_DISTINCT,
         audit: AuditLog | None = None,
         actor: str | None = None,
     ) -> dict[str, list[Any]]:
-        """Return the view of ``table`` (column name -> values) that ``role`` may see.
+        """Return the view of ``data`` (column name -> values) that ``role`` may see.
 
         Denied columns are left out. Tokenized columns go through
         :meth:`Tokenizer.tokenize_column`, so a low-cardinality column raises
         :class:`colgov.LowCardinalityError` rather than leaking. Nothing is
         returned unless every column resolves cleanly.
 
+        ``table`` selects which table's decisions in ``catalog`` apply.
         With ``audit``, the view is recorded (``actor`` is then required)
         before it is returned; failures are recorded too.
         """
         if audit is not None:
             _require_text(actor, "actor")
-        plan = self.plan(role, table, catalog)
+        plan = self.plan(role, data, catalog, table=table)
         try:
-            view = self._build_view(table, plan, role, tokenizer, min_distinct)
+            view = self._build_view(data, plan, role, tokenizer, min_distinct)
         except Exception as exc:
             if audit is not None:
                 record_view(audit, actor, role, plan, "error", str(exc), 0)  # type: ignore[arg-type]
@@ -180,6 +228,7 @@ class Policy:
         tokens: Iterable[str | None],
         *,
         column: str,
+        table: str | None = None,
         role: str,
         catalog: Catalog,
         tokenizer: Tokenizer,
@@ -189,16 +238,18 @@ class Policy:
     ) -> list[str | None]:
         """Turn ``column``'s tokens back into plaintext, if ``role`` may.
 
-        Allowed only when the column resolves to ``clear`` for ``role``.
-        ``actor`` (who is asking) and ``purpose`` (why) are required and are
-        recorded in ``audit`` with the outcome, before any plaintext is
-        returned. Denied requests raise :class:`AccessDenied`; a bad token
+        Needs an explicit ``detokenize: true`` grant on the column's label
+        (see :meth:`may_detokenize`); seeing the column in clear is not
+        enough. ``actor`` (who is asking) and ``purpose`` (why) are required
+        and are recorded in ``audit`` with the outcome, before any plaintext
+        is returned. Denied requests raise :class:`AccessDenied`; a bad token
         raises :class:`colgov.InvalidToken`. Both are recorded.
         """
         _require_text(actor, "actor")
         _require_text(purpose, "purpose")
         tokens = list(tokens)
-        resolution = self.resolve(role, column, catalog)
+        allowed, reason = self.may_detokenize(role, column, catalog, table=table)
+        where = column if table is None else f"{table}.{column}"
 
         def log(outcome: str, reason: str, count: int = 0) -> None:
             record_event(
@@ -207,27 +258,27 @@ class Policy:
                 role=role,
                 action="detokenize",
                 outcome=outcome,
-                columns=[column],
+                columns=[where],
                 reason=reason,
                 purpose=purpose,
                 count=count,
             )
 
-        if resolution.treatment is not Treatment.CLEAR:
-            reason = f"detokenize needs clear access: {resolution.reason}"
+        decision = catalog.get(column, table=table)
+        if not allowed or decision is None:
             log("denied", reason)
-            raise AccessDenied(f"role {role!r} may not detokenize {column!r}: {resolution.reason}")
+            raise AccessDenied(f"role {role!r} may not detokenize {where!r}: {reason}")
         try:
-            plaintext = [tokenizer.detokenize(t, column=column) for t in tokens]
+            plaintext = [tokenizer.detokenize(t, column=decision.token_domain) for t in tokens]
         except InvalidToken as exc:
             log("error", str(exc))
             raise
-        log("allowed", resolution.reason, len(plaintext))
+        log("allowed", reason, len(plaintext))
         return plaintext
 
     def _build_view(
         self,
-        table: Mapping[str, Iterable[Any]],
+        data: Mapping[str, Iterable[Any]],
         plan: list[Resolution],
         role: str,
         tokenizer: Tokenizer | None,
@@ -238,12 +289,12 @@ class Policy:
         view: dict[str, list[Any]] = {}
         for r in plan:
             if r.treatment is Treatment.CLEAR:
-                view[r.column] = list(table[r.column])
+                view[r.column] = list(data[r.column])
             elif r.treatment is Treatment.TOKENIZE:
                 if tokenizer is None:  # unreachable: checked above, kept fail-closed
                     raise PolicyError(f"role {role!r} needs a tokenizer to view this table")
                 view[r.column] = tokenizer.tokenize_column(
-                    table[r.column], column=r.column, min_distinct=min_distinct
+                    data[r.column], column=r.domain or r.column, min_distinct=min_distinct
                 )
         return view
 
@@ -269,6 +320,28 @@ def record_view(
         reason=reason,
         count=count,
     )
+
+
+def _parse_grant(spec: object, where: str) -> Grant:
+    if isinstance(spec, Grant):
+        return spec
+    if isinstance(spec, Mapping):
+        unknown = set(spec) - _GRANT_KEYS
+        if unknown:
+            raise PolicyError(f"{where}: unknown keys {sorted(map(str, unknown))} (expected view, detokenize)")
+        detokenize = spec.get("detokenize", False)
+        if not isinstance(detokenize, bool):
+            raise PolicyError(f"{where}: 'detokenize' must be true or false")
+        return Grant(view=_parse_treatment(spec.get("view", "deny"), where), detokenize=detokenize)
+    return Grant(view=_parse_treatment(spec, where))
+
+
+def _parse_treatment(value: object, where: str) -> Treatment:
+    try:
+        return Treatment(value)
+    except ValueError:
+        allowed = ", ".join(t.value for t in Treatment)
+        raise PolicyError(f"{where}: unknown treatment {value!r} (expected one of: {allowed})") from None
 
 
 def _require_text(value: object, name: str) -> None:

@@ -12,7 +12,8 @@ from colgov.audit import (
     MemoryAuditLog,
     verify_audit_log,
 )
-from colgov.policy import AccessDenied, Policy, PolicyError, Resolution, Treatment
+from colgov.keys import KeySpecError, load_key, load_keyring
+from colgov.policy import AccessDenied, Grant, Policy, PolicyError, Resolution, Treatment
 from colgov.review import Catalog, CatalogError, Decision
 from colgov.risk import (
     DEFAULT_MIN_DISTINCT,
@@ -23,9 +24,9 @@ from colgov.risk import (
     k_anonymity,
 )
 from colgov.rules import PUBLIC, Label, Rule, RulePack, RulePackError, Suggestion
-from colgov.tokenization import MIN_MASTER_KEY_BYTES, InvalidToken, Tokenizer
+from colgov.tokenization import MIN_MASTER_KEY_BYTES, InvalidToken, Keyring, Tokenizer
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "__version__",
     "DEFAULT_MIN_DISTINCT",
@@ -39,9 +40,12 @@ __all__ = [
     "CatalogError",
     "ColumnRisk",
     "Decision",
+    "Grant",
     "InvalidToken",
     "JsonlAuditLog",
     "KAnonymity",
+    "KeySpecError",
+    "Keyring",
     "Label",
     "LowCardinalityError",
     "MemoryAuditLog",
@@ -56,5 +60,7 @@ __all__ = [
     "Treatment",
     "column_risk",
     "k_anonymity",
+    "load_key",
+    "load_keyring",
     "verify_audit_log",
 ]

@@ -23,12 +23,25 @@ def test_tokens_stable_across_instances():
 
 
 def test_known_answer_vectors(tok):
-    # Pins the token format: HKDF info label, AES-SIV, v1 header, base64url.
+    # Pins the v2 token format: header (version + key id), HKDF info label,
+    # AES-SIV with the header as associated data, base64url.
     # If this fails, previously stored tokens would no longer join.
     assert tok.tokenize("ada@example.com", column="email") == (
-        "dEmr4UrbAT3YC8v2o0S4Uuf_L06ueUs51KdWaw0Y8YQ"
+        "AuJGWyYRMapTELLSbPYEdRLVTLsVKGm7wB_HW7FxW1f823EsqQ"
     )
-    assert tok.tokenize("", column="email") == "CSkCe6Fq2YiboG1Blv4dhrw"
+    assert tok.tokenize("", column="email") == "AuJGWyY3HkPlqP3Z1dWjA8UOzX13SQ"
+
+
+# Tokens produced by colgov 0.1-0.2 (format v1) with KEY.
+V1_ADA = "dEmr4UrbAT3YC8v2o0S4Uuf_L06ueUs51KdWaw0Y8YQ"
+V1_EMPTY = "CSkCe6Fq2YiboG1Blv4dhrw"
+
+
+def test_reads_v1_tokens(tok):
+    assert tok.detokenize(V1_ADA, column="email") == "ada@example.com"
+    assert tok.detokenize(V1_EMPTY, column="email") == ""
+    with pytest.raises(InvalidToken):
+        tok.detokenize(V1_ADA, column="phone")
 
 
 @pytest.mark.parametrize(

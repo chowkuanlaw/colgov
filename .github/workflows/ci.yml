@@ -27,7 +27,7 @@ jobs:
           java-version: "17"
       # Editable install: doctests are collected from src/, so the tests
       # must import the same copy of the package.
-      - run: python -m pip install -e ".[test,pandas,spark]"
+      - run: python -m pip install -e ".[test,pandas,spark,aws]" "moto[kms]"
       - run: python -m pytest
 
   test-minimum-deps:

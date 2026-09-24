@@ -52,6 +52,7 @@ def apply(
     *,
     role: str,
     catalog: Catalog,
+    table: str | None = None,
     tokenizer: Tokenizer | None = None,
     min_distinct: int = DEFAULT_MIN_DISTINCT,
     audit: AuditLog | None = None,
@@ -65,7 +66,7 @@ def apply(
     _check_columns(df)
     if audit is not None:
         _require_text(actor, "actor")
-    plan = policy.plan(role, list(df.columns), catalog)
+    plan = policy.plan(role, list(df.columns), catalog, table=table)
     try:
         out = _build(df, plan, role, tokenizer, min_distinct)
     except Exception as exc:
@@ -92,7 +93,7 @@ def _build(
             out[r.column] = df[r.column]
         elif r.treatment is Treatment.TOKENIZE:
             tokens = tokenizer.tokenize_column(  # type: ignore[union-attr]
-                _values(df[r.column]), column=r.column, min_distinct=min_distinct
+                _values(df[r.column]), column=r.domain or r.column, min_distinct=min_distinct
             )
             out[r.column] = pd.Series(tokens, index=df.index, dtype=object)
     return out
@@ -109,6 +110,7 @@ def detokenize(
     purpose: str,
     audit: AuditLog,
     column: str | None = None,
+    table: str | None = None,
 ) -> pd.Series:
     """Detokenize a Series under :meth:`colgov.Policy.detokenize`.
 
@@ -120,6 +122,7 @@ def detokenize(
     plaintext = policy.detokenize(
         _values(tokens),
         column=column,
+        table=table,
         role=role,
         catalog=catalog,
         tokenizer=tokenizer,

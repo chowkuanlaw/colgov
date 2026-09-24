@@ -137,7 +137,10 @@ def test_events_never_contain_data(tmp_path):
 
 
 def _setup():
-    policy = Policy({"support": {"email": "clear"}, "analyst": {"email": "tokenize"}})
+    policy = Policy({
+        "support": {"email": {"view": "clear", "detokenize": True}},
+        "analyst": {"email": "tokenize"},
+    })
     catalog = Catalog()
     catalog.decide("email", "email", by="reviewer")
     catalog.decide("amount", PUBLIC, by="reviewer")
@@ -169,7 +172,7 @@ def test_detokenize_allowed_for_clear_role():
 @pytest.mark.parametrize(
     "role, column, reason",
     [
-        ("analyst", "email", "grants tokenize"),
+        ("analyst", "email", "no detokenize grant"),
         ("intern", "email", "unknown role"),
         ("support", "notes", "not been reviewed"),
     ],
@@ -259,5 +262,5 @@ def test_tokenizer_pickles_without_cipher_cache():
     token = tok.tokenize("x", column="c")  # populates the cache
     clone = pickle.loads(pickle.dumps(tok))
     assert clone.tokenize("x", column="c") == token
-    assert "master key hidden" in repr(tok)
+    assert "master keys hidden" in repr(tok)
     assert KEY.hex() not in repr(tok)

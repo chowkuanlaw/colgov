@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "colgov"
-version = "0.2.0"
+version = "0.3.0"
 description = "Deterministic, reversible tokenization and fail-closed access policy for tabular PII."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,6 +39,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+aws = [
+    "boto3>=1.26",
+]
 pandas = [
     "pandas>=2.0",
 ]

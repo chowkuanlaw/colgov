@@ -18,7 +18,7 @@ roles:
     email: tokenize
     phone_number: deny
   support:
-    email: clear
+    email: {view: clear, detokenize: true}
 """
 
 
@@ -53,7 +53,7 @@ def test_version(capsys):
     with pytest.raises(SystemExit) as exc_info:
         main(["--version"])
     assert exc_info.value.code == 0
-    assert "colgov 0.2.0" in capsys.readouterr().out
+    assert "colgov 0.3.0" in capsys.readouterr().out
 
 
 def test_no_command_is_usage_error(capsys):
@@ -241,7 +241,7 @@ def test_audit_verify(workdir, capsys):
 
 
 def _review(workdir, answers, catalog="new.yaml", by="alice"):
-    args = argparse.Namespace(data="data.csv", catalog=catalog, by=by, pack="core", sample_size=1000)
+    args = argparse.Namespace(data="data.csv", catalog=catalog, by=by, pack="core", sample_size=1000, table=None)
     feed = iter(answers)
 
     def ask(prompt):
@@ -305,3 +305,83 @@ def test_review_does_not_print_values(workdir):
 def test_review_needs_reviewer_name(workdir, capsys):
     code, _, err = run(capsys, "review", "data.csv", "-c", "new.yaml", "--by", " ")
     assert code == 1 and "--by" in err
+
+
+# --- key rotation, KMS, tables (0.3) ------------------------------------------------
+
+NEW_KEY = bytes(range(1, 33))
+NEW_B64 = base64.b64encode(NEW_KEY).decode()
+
+
+def test_rotation_via_key_file_and_retokenize(workdir, capsys, monkeypatch):
+    monkeypatch.delenv(KEY_ENV)
+    (workdir / "old.keys").write_text(KEY_B64 + "\n")
+    (workdir / "new.keys").write_text(f"# primary first\n{NEW_B64}\n{KEY_B64}\n")
+    run(capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "analyst", "--key-file", "old.keys", "-o", "old.csv")
+
+    code, _, err = run(capsys, "retokenize", "old.csv", "--columns", "customer_email", "--key-file", "new.keys", "-o", "new.csv")
+    assert code == 0 and "re-issued 20 token(s)" in err
+    rows = list(csv.DictReader(open("new.csv", newline="")))
+    new = Tokenizer(NEW_KEY)
+    assert rows[0]["customer_email"] == new.tokenize("user0@example.com", column="customer_email")
+    assert rows[0]["gender"] == "M"  # untouched columns pass through
+
+    # A second run is a no-op.
+    code, _, err = run(capsys, "retokenize", "new.csv", "--columns", "customer_email", "--key-file", "new.keys", "-o", "-")
+    assert "re-issued 0 token(s)" in err
+
+
+def test_retokenize_bad_columns(workdir, capsys):
+    code, _, err = run(capsys, "retokenize", "data.csv", "--columns", "nope")
+    assert code == 1 and "not found: nope" in err
+
+
+def test_env_keyring_comma_separated(workdir, capsys, monkeypatch):
+    old_token = Tokenizer(KEY).tokenize("user0@example.com", column="customer_email")
+    (workdir / "t.txt").write_text(old_token + "\n")
+    monkeypatch.setenv(KEY_ENV, f"{NEW_B64},{KEY_B64}")
+    code, out, _ = run(capsys, "detokenize", *POLICY_ARGS, "--role", "support", *DETOK, "t.txt")
+    assert code == 0 and out.strip() == "user0@example.com"
+
+
+def test_keygen_aws_kms(capsys, monkeypatch):
+    moto = pytest.importorskip("moto")
+    boto3 = pytest.importorskip("boto3")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-southeast-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    with moto.mock_aws():
+        key_id = boto3.client("kms").create_key()["KeyMetadata"]["KeyId"]
+        code, out, _ = run(capsys, "keygen", "--aws-kms-key-id", key_id)
+        spec = out.strip()
+        assert code == 0 and spec.startswith("aws-kms:")
+        from colgov import load_key
+
+        assert len(load_key(spec)) == 32
+
+
+def test_table_option(workdir, capsys):
+    cat = Catalog()
+    cat.decide("customer_email", "email", by="alice", table="customers")
+    cat.save("tables.yaml")
+    args = ("-p", "policy.yaml", "-c", "tables.yaml", "--role", "analyst")
+    code, out, _ = run(capsys, "plan", "data.csv", *args, "--table", "customers")
+    assert out.splitlines()[0].split()[:2] == ["customer_email", "tokenize"]
+    code, out, _ = run(capsys, "plan", "data.csv", *args)
+    assert out.splitlines()[0].split()[:2] == ["customer_email", "deny"]
+
+
+def test_plan_shows_detokenize_grants(workdir, capsys):
+    code, out, _ = run(capsys, "plan", "data.csv", *POLICY_ARGS, "--role", "support")
+    assert "(may detokenize)" in out.splitlines()[0]
+    code, out, _ = run(capsys, "plan", "data.csv", *POLICY_ARGS, "--role", "analyst")
+    assert "(may detokenize)" not in out
+
+
+def test_review_with_table(workdir):
+    args = argparse.Namespace(data="data.csv", catalog="t.yaml", by="alice", pack="core", sample_size=1000, table="customers")
+    answers = iter(["1", "q"])
+    cmd_review(args, ask=lambda prompt: next(answers), out=io.StringIO())
+    cat = Catalog.load("t.yaml")
+    assert cat.get("customer_email", table="customers").label == "email"
+    assert cat.get("customer_email") is None
