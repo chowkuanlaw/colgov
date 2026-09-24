@@ -70,6 +70,18 @@ class Tokenizer:
         self._master_key = bytes(master_key)
         self._ciphers: dict[str, AESSIV] = {}
 
+    def __getstate__(self) -> dict[str, bytes]:
+        # Cipher objects don't pickle; rebuild them lazily after unpickling
+        # (e.g. on Spark executors).
+        return {"master_key": self._master_key}
+
+    def __setstate__(self, state: dict[str, bytes]) -> None:
+        self._master_key = state["master_key"]
+        self._ciphers = {}
+
+    def __repr__(self) -> str:
+        return "Tokenizer(<master key hidden>)"
+
     @staticmethod
     def generate_key() -> bytes:
         """Return a new random master key from the OS CSPRNG."""
