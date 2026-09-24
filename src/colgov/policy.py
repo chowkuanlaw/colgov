@@ -155,7 +155,8 @@ class Policy:
             if r.treatment is Treatment.CLEAR:
                 view[r.column] = list(table[r.column])
             elif r.treatment is Treatment.TOKENIZE:
-                assert tokenizer is not None
+                if tokenizer is None:  # unreachable: checked above, kept fail-closed
+                    raise PolicyError(f"role {role!r} needs a tokenizer to view this table")
                 view[r.column] = tokenizer.tokenize_column(
                     table[r.column], column=r.column, min_distinct=min_distinct
                 )
