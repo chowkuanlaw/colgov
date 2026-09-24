@@ -28,7 +28,6 @@ from colgov.tokenization import MIN_MASTER_KEY_BYTES, InvalidToken, Keyring, Tok
 
 __version__ = "0.3.0"
 __all__ = [
-    "__version__",
     "DEFAULT_MIN_DISTINCT",
     "MIN_MASTER_KEY_BYTES",
     "PUBLIC",
@@ -58,6 +57,7 @@ __all__ = [
     "Suggestion",
     "Tokenizer",
     "Treatment",
+    "__version__",
     "column_risk",
     "k_anonymity",
     "load_key",

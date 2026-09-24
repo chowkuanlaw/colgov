@@ -195,7 +195,7 @@ def test_suggest_review_resolve_end_to_end(tokenizer):
 
     assert list(view) == ["customer_email", "order_total"]
     assert view["order_total"] == table["order_total"]
-    assert all(t != v for t, v in zip(view["customer_email"], table["customer_email"]))
+    assert all(t != v for t, v in zip(view["customer_email"], table["customer_email"], strict=True))
 
 
 # --- grants, detokenize permission, tables and domains (0.3) ----------------------
@@ -265,8 +265,16 @@ def test_clear_view_no_longer_implies_detokenize(tokenizer):
     cat.decide("email", "email", by="a")
     audit = MemoryAuditLog()
     with pytest.raises(AccessDenied, match="no detokenize grant"):
-        p.detokenize([tokenizer.tokenize("a@x.com", column="email")], column="email", role="support",
-                     catalog=cat, tokenizer=tokenizer, actor="c", purpose="p", audit=audit)
+        p.detokenize(
+            [tokenizer.tokenize("a@x.com", column="email")],
+            column="email",
+            role="support",
+            catalog=cat,
+            tokenizer=tokenizer,
+            actor="c",
+            purpose="p",
+            audit=audit,
+        )
     assert audit.events[0].outcome == "denied"
 
 
@@ -299,10 +307,27 @@ def test_detokenize_uses_domain_and_table(tokenizer):
     cat.decide("buyer_email", "email", by="a", table="orders", domain="email")
     token = tokenizer.tokenize("a@x.com", column="email")
     audit = MemoryAuditLog()
-    out = p.detokenize([token], column="buyer_email", table="orders", role="fraud", catalog=cat,
-                       tokenizer=tokenizer, actor="c", purpose="p", audit=audit)
+    out = p.detokenize(
+        [token],
+        column="buyer_email",
+        table="orders",
+        role="fraud",
+        catalog=cat,
+        tokenizer=tokenizer,
+        actor="c",
+        purpose="p",
+        audit=audit,
+    )
     assert out == ["a@x.com"]
     assert audit.events[0].columns == ("orders.buyer_email",)
     with pytest.raises(AccessDenied, match="not been reviewed"):
-        p.detokenize([token], column="buyer_email", role="fraud", catalog=cat, tokenizer=tokenizer,
-                     actor="c", purpose="p", audit=audit)
+        p.detokenize(
+            [token],
+            column="buyer_email",
+            role="fraud",
+            catalog=cat,
+            tokenizer=tokenizer,
+            actor="c",
+            purpose="p",
+            audit=audit,
+        )

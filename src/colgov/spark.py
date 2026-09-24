@@ -16,6 +16,8 @@ try:
 except ImportError as exc:  # pragma: no cover - exercised only without pyspark
     raise ImportError('colgov.spark needs PySpark: pip install "colgov[spark]"') from exc
 
+from typing import Any
+
 from colgov.audit import AuditLog
 from colgov.policy import (
     Policy,
@@ -105,9 +107,7 @@ def _build(
     types = dict(sdf.dtypes)
     for column in to_tokenize:
         if types[column] != "string":
-            raise TypeError(
-                f"column {column!r} is {types[column]}, not string; cast it before tokenizing"
-            )
+            raise TypeError(f"column {column!r} is {types[column]}, not string; cast it before tokenizing")
     _check_cardinality(sdf, to_tokenize, min_distinct)
 
     selected = []
@@ -124,6 +124,8 @@ def _check_cardinality(sdf: DataFrame, columns: list[str], min_distinct: int) ->
     if not columns:
         return
     counts = sdf.agg(*[F.countDistinct(F.col(_quote(c))).alias(f"_{i}") for i, c in enumerate(columns)]).first()
+    if counts is None:  # pragma: no cover - a global aggregation always returns one row
+        return
     for i, column in enumerate(columns):
         n_distinct = counts[i]
         if 0 < n_distinct < min_distinct:
@@ -145,9 +147,9 @@ def _small_column_risk(sdf: DataFrame, column: str) -> ColumnRisk:
     )
 
 
-def _tokenize_udf(tokenizer: Tokenizer, column: str):
+def _tokenize_udf(tokenizer: Tokenizer, column: str) -> Any:
     # No type hints: Spark would try to infer an Arrow (pandas) UDF from them.
-    def tokenize(value):
+    def tokenize(value):  # type: ignore[no-untyped-def]
         return tokenizer.tokenize(value, column=column)
 
     return F.udf(tokenize, StringType())

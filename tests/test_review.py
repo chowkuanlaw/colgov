@@ -126,7 +126,10 @@ def test_yaml_unquoted_timestamp_accepted():
         ("columns: {c: {label: email, decided_by: a, decided_at: 'soon'}}", "ISO 8601"),
         ("columns: {c: {label: email, decided_by: a, decided_at: '2026-01-01T00:00:00'}}", "timezone"),
         ("columns: {c: {label: email, decided_at: '2026-01-01T00:00:00+00:00'}}", "named reviewer"),
-        ("columns: {c: {label: email, decided_by: a, decided_at: '2026-01-01T00:00:00+00:00', rule_ids: x}}", "rule_ids"),
+        (
+            "columns: {c: {label: email, decided_by: a, decided_at: '2026-01-01T00:00:00+00:00', rule_ids: x}}",
+            "rule_ids",
+        ),
         ("columns: {c: [unclosed", "YAML"),
     ],
 )
@@ -181,7 +184,7 @@ def test_yaml_round_trip_with_tables(tmp_path):
     assert text.startswith("version: 2\n")
     assert "tables:" in text and "domain: email" in text
     loaded = Catalog.from_yaml(text)
-    order = lambda d: (d.table or "", d.column)  # noqa: E731
+    order = lambda d: (d.table or "", d.column)
     assert sorted(loaded, key=order) == sorted(cat, key=order)
 
 

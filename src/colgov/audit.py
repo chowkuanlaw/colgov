@@ -192,6 +192,9 @@ def _last_hash(path: str) -> str:
     except FileNotFoundError:
         return _GENESIS
     try:
-        return json.loads(last)["hash"]
+        last_hash = json.loads(last)["hash"]
+        if not isinstance(last_hash, str):
+            raise TypeError("hash is not a string")
+        return last_hash
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise AuditLogError(f"{path}: last line is not a valid audit entry") from exc

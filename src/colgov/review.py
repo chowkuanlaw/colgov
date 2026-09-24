@@ -189,8 +189,7 @@ class Catalog:
         out: dict[str, Any] = {"version": CATALOG_VERSION}
         untabled = {c: _entry(d) for (t, c), d in sorted(self._items(None))}
         tables = {
-            table: {"columns": {c: _entry(d) for (_, c), d in sorted(self._items(table))}}
-            for table in self.tables
+            table: {"columns": {c: _entry(d) for (_, c), d in sorted(self._items(table))}} for table in self.tables
         }
         if tables:
             out["tables"] = tables
@@ -305,8 +304,8 @@ def _parse_columns(columns: Any, table: str | None) -> list[Decision]:
         decisions.append(
             Decision(
                 column=column,
-                label=entry.get("label"),
-                decided_by=entry.get("decided_by"),
+                label=entry.get("label", ""),  # validated by Catalog._add
+                decided_by=entry.get("decided_by", ""),
                 decided_at=decided_at,
                 note=str(entry.get("note", "")),
                 rule_ids=tuple(rule_ids),

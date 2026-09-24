@@ -346,6 +346,13 @@ free-text prose — for that, use
 at it. An optional bridge is planned so Presidio can act as a value-shape
 detector feeding `colgov`'s classification.
 
+## Security
+
+Read the [threat model](docs/threat-model.md) before using colgov with real
+personal data. Report vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md). The [API stability policy](docs/stability.md)
+explains what will stay compatible from 1.0.
+
 ## License
 
 Apache-2.0

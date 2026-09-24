@@ -108,8 +108,9 @@ def test_apply_to_file(workdir, capsys):
 
 
 def test_apply_to_stdout_with_audit(workdir, capsys):
-    code, out, _ = run(capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "support",
-                       "--audit", "audit.jsonl", "--actor", "carol")
+    code, out, _ = run(
+        capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "support", "--audit", "audit.jsonl", "--actor", "carol"
+    )
     assert code == 0
     assert out.splitlines()[1] == "user0@example.com,M"
     assert verify_audit_log("audit.jsonl") == 1
@@ -139,7 +140,9 @@ def test_apply_missing_key(workdir, capsys, monkeypatch):
     assert "no master key" in err and "colgov keygen" in err
 
 
-@pytest.mark.parametrize("bad, message", [("%%%", "not valid base64"), (base64.b64encode(b"short").decode(), "at least 32")])
+@pytest.mark.parametrize(
+    "bad, message", [("%%%", "not valid base64"), (base64.b64encode(b"short").decode(), "at least 32")]
+)
 def test_apply_bad_key(workdir, capsys, monkeypatch, bad, message):
     monkeypatch.setenv(KEY_ENV, bad)
     code, _, err = run(capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "analyst")
@@ -149,7 +152,9 @@ def test_apply_bad_key(workdir, capsys, monkeypatch, bad, message):
 def test_apply_key_file(workdir, capsys, monkeypatch):
     monkeypatch.delenv(KEY_ENV)
     (workdir / "key.txt").write_text(KEY_B64 + "\n")
-    code, _, _ = run(capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "analyst", "--key-file", "key.txt", "-o", "out.csv")
+    code, _, _ = run(
+        capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "analyst", "--key-file", "key.txt", "-o", "out.csv"
+    )
     assert code == 0
 
 
@@ -186,8 +191,10 @@ def test_missing_file_is_clean_error(workdir, capsys):
 def _tokens_file(workdir):
     tok = Tokenizer(KEY)
     (workdir / "tokens.txt").write_text(
-        tok.tokenize("user0@example.com", column="customer_email") + "\n\n"
-        + tok.tokenize("user1@example.com", column="customer_email") + "\n"
+        tok.tokenize("user0@example.com", column="customer_email")
+        + "\n\n"
+        + tok.tokenize("user1@example.com", column="customer_email")
+        + "\n"
     )
 
 
@@ -248,7 +255,7 @@ def _review(workdir, answers, catalog="new.yaml", by="alice"):
         try:
             return next(feed)
         except StopIteration:
-            raise EOFError
+            raise EOFError from None
 
     out = io.StringIO()
     code = cmd_review(args, ask=ask, out=out)
@@ -319,7 +326,9 @@ def test_rotation_via_key_file_and_retokenize(workdir, capsys, monkeypatch):
     (workdir / "new.keys").write_text(f"# primary first\n{NEW_B64}\n{KEY_B64}\n")
     run(capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "analyst", "--key-file", "old.keys", "-o", "old.csv")
 
-    code, _, err = run(capsys, "retokenize", "old.csv", "--columns", "customer_email", "--key-file", "new.keys", "-o", "new.csv")
+    code, _, err = run(
+        capsys, "retokenize", "old.csv", "--columns", "customer_email", "--key-file", "new.keys", "-o", "new.csv"
+    )
     assert code == 0 and "re-issued 20 token(s)" in err
     rows = list(csv.DictReader(open("new.csv", newline="")))
     new = Tokenizer(NEW_KEY)
@@ -327,7 +336,9 @@ def test_rotation_via_key_file_and_retokenize(workdir, capsys, monkeypatch):
     assert rows[0]["gender"] == "M"  # untouched columns pass through
 
     # A second run is a no-op.
-    code, _, err = run(capsys, "retokenize", "new.csv", "--columns", "customer_email", "--key-file", "new.keys", "-o", "-")
+    code, _, err = run(
+        capsys, "retokenize", "new.csv", "--columns", "customer_email", "--key-file", "new.keys", "-o", "-"
+    )
     assert "re-issued 0 token(s)" in err
 
 
@@ -379,7 +390,9 @@ def test_plan_shows_detokenize_grants(workdir, capsys):
 
 
 def test_review_with_table(workdir):
-    args = argparse.Namespace(data="data.csv", catalog="t.yaml", by="alice", pack="core", sample_size=1000, table="customers")
+    args = argparse.Namespace(
+        data="data.csv", catalog="t.yaml", by="alice", pack="core", sample_size=1000, table="customers"
+    )
     answers = iter(["1", "q"])
     cmd_review(args, ask=lambda prompt: next(answers), out=io.StringIO())
     cat = Catalog.load("t.yaml")

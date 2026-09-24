@@ -51,6 +51,18 @@ spark = [
 test = [
     "pytest>=7",
 ]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "types-PyYAML",
+    "pandas-stubs",
+    "boto3-stubs",
+]
+docs = [
+    "mkdocs>=1.6,<2",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
+]
 
 [project.scripts]
 colgov = "colgov.cli:main"
@@ -66,3 +78,32 @@ packages = ["src/colgov"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "src"]
 addopts = "--doctest-modules"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F",   # pycodestyle, pyflakes
+    "I",             # import sorting
+    "B",             # bugbear
+    "UP",            # pyupgrade
+    "SIM",           # simplify
+    "DTZ",           # timezone-aware datetimes
+    "S",             # bandit rules
+    "RUF",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108", "S301", "E501", "E731", "SIM115", "DTZ001", "RUF059"]
+
+[tool.mypy]
+strict = true
+files = ["src/colgov"]
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["pyspark.*", "moto.*"]
+ignore_missing_imports = true

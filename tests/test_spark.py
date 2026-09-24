@@ -5,9 +5,9 @@ import pytest
 
 pytest.importorskip("pyspark")
 
-from pyspark.sql import SparkSession  # noqa: E402
+from pyspark.sql import SparkSession
 
-from colgov import (  # noqa: E402
+from colgov import (
     PUBLIC,
     Catalog,
     LowCardinalityError,
@@ -16,7 +16,7 @@ from colgov import (  # noqa: E402
     PolicyError,
     Tokenizer,
 )
-from colgov import spark as cspark  # noqa: E402
+from colgov import spark as cspark
 
 KEY = bytes(range(32))
 

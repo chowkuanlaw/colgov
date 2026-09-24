@@ -125,8 +125,14 @@ def test_events_never_contain_data(tmp_path):
     policy, catalog = _setup()
     path = tmp_path / "audit.jsonl"
     policy.detokenize(
-        [token], column="email", role="support", catalog=catalog, tokenizer=tok,
-        actor="alice", purpose="TICKET-1", audit=JsonlAuditLog(path),
+        [token],
+        column="email",
+        role="support",
+        catalog=catalog,
+        tokenizer=tok,
+        actor="alice",
+        purpose="TICKET-1",
+        audit=JsonlAuditLog(path),
     )
     text = path.read_text()
     assert "ada@example.com" not in text
@@ -137,10 +143,12 @@ def test_events_never_contain_data(tmp_path):
 
 
 def _setup():
-    policy = Policy({
-        "support": {"email": {"view": "clear", "detokenize": True}},
-        "analyst": {"email": "tokenize"},
-    })
+    policy = Policy(
+        {
+            "support": {"email": {"view": "clear", "detokenize": True}},
+            "analyst": {"email": "tokenize"},
+        }
+    )
     catalog = Catalog()
     catalog.decide("email", "email", by="reviewer")
     catalog.decide("amount", PUBLIC, by="reviewer")
@@ -150,8 +158,13 @@ def _setup():
 def _detok(tokens, role="support", column="email", audit=None, **overrides):
     policy, catalog = _setup()
     kwargs = dict(
-        column=column, role=role, catalog=catalog, tokenizer=Tokenizer(KEY),
-        actor="alice", purpose="TICKET-1", audit=audit if audit is not None else MemoryAuditLog(),
+        column=column,
+        role=role,
+        catalog=catalog,
+        tokenizer=Tokenizer(KEY),
+        actor="alice",
+        purpose="TICKET-1",
+        audit=audit if audit is not None else MemoryAuditLog(),
     )
     kwargs.update(overrides)
     return policy.detokenize(tokens, **kwargs)
@@ -165,7 +178,10 @@ def test_detokenize_allowed_for_clear_role():
     [event] = audit.events
     assert (event.outcome, event.action, event.count) == ("allowed", "detokenize", 2)
     assert (event.actor, event.role, event.columns, event.purpose) == (
-        "alice", "support", ("email",), "TICKET-1",
+        "alice",
+        "support",
+        ("email",),
+        "TICKET-1",
     )
 
 
@@ -236,8 +252,9 @@ def test_apply_records_failures():
     policy, catalog = _setup()
     audit = MemoryAuditLog()
     with pytest.raises(LowCardinalityError):
-        policy.apply({"email": ["a", "b"]}, role="analyst", catalog=catalog,
-                     tokenizer=Tokenizer(KEY), audit=audit, actor="bob")
+        policy.apply(
+            {"email": ["a", "b"]}, role="analyst", catalog=catalog, tokenizer=Tokenizer(KEY), audit=audit, actor="bob"
+        )
     assert [e.outcome for e in audit.events] == ["error"]
 
 

@@ -40,14 +40,13 @@ class KeySpecError(ValueError):
     """A key spec is malformed or could not be resolved."""
 
 
-
 def load_key(spec: str, *, kms_client: Any = None) -> bytes:
     """Resolve one key spec to master key bytes."""
     spec = spec.strip()
     if not spec:
         raise KeySpecError("empty key spec")
     if spec.startswith(AWS_KMS_PREFIX):
-        return _decrypt_aws_kms(_b64(spec[len(AWS_KMS_PREFIX):], "aws-kms blob"), kms_client)
+        return _decrypt_aws_kms(_b64(spec[len(AWS_KMS_PREFIX) :], "aws-kms blob"), kms_client)
     key = _b64(spec, "key")
     if len(key) < MIN_MASTER_KEY_BYTES:
         raise KeySpecError(f"key is {len(key)} bytes; at least {MIN_MASTER_KEY_BYTES} are required")

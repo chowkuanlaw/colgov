@@ -87,7 +87,7 @@ def _build(
 ) -> pd.DataFrame:
     if tokenizer is None and any(r.treatment is Treatment.TOKENIZE for r in plan):
         raise PolicyError(f"role {role!r} needs a tokenizer to view this table")
-    out = pd.DataFrame(index=df.index)
+    out: pd.DataFrame = pd.DataFrame(index=df.index)
     for r in plan:
         if r.treatment is Treatment.CLEAR:
             out[r.column] = df[r.column]
@@ -116,7 +116,8 @@ def detokenize(
 
     ``column`` defaults to the Series name.
     """
-    column = column if column is not None else tokens.name
+    if column is None:
+        column = tokens.name if isinstance(tokens.name, str) else None
     if not isinstance(column, str) or not column:
         raise ValueError("pass column=... or give the Series a name")
     plaintext = policy.detokenize(
@@ -135,7 +136,8 @@ def detokenize(
 
 def _values(series: pd.Series) -> list[Any]:
     """Series values as a list, with every kind of missing value as None."""
-    return series.astype(object).where(series.notna(), None).tolist()
+    values: list[Any] = series.astype(object).where(series.notna(), None).tolist()
+    return values
 
 
 def _check_columns(df: pd.DataFrame) -> None:

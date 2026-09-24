@@ -33,7 +33,7 @@ import csv
 import os
 import sys
 from collections.abc import Callable, Sequence
-from typing import TextIO
+from typing import Any, TextIO
 
 import colgov
 from colgov.audit import AuditLogError, JsonlAuditLog, verify_audit_log
@@ -67,7 +67,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        return args.func(args)
+        status: int = args.func(args)
+        return status
     except CliError as exc:
         print(f"colgov: error: {exc}", file=sys.stderr)
     except _ERRORS as exc:
@@ -199,9 +200,11 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
 def cmd_detokenize(args: argparse.Namespace) -> int:
     policy, catalog = Policy.load(args.policy), Catalog.load(args.catalog)
-    source = sys.stdin if args.tokens == "-" else open(args.tokens, encoding="utf-8")
-    with source:
-        tokens = [line.strip() or None for line in source]
+    if args.tokens == "-":
+        tokens = [line.strip() or None for line in sys.stdin]
+    else:
+        with open(args.tokens, encoding="utf-8") as f:
+            tokens = [line.strip() or None for line in f]
     plaintext = policy.detokenize(
         tokens,
         column=args.column,
@@ -223,7 +226,8 @@ def cmd_retokenize(args: argparse.Namespace) -> int:
     columns = [c.strip() for c in args.columns.split(",") if c.strip()]
     missing = [c for c in columns if c not in data]
     if not columns or missing:
-        raise CliError(f"--columns must name columns of {args.data}" + (f"; not found: {', '.join(missing)}" if missing else ""))
+        detail = f"; not found: {', '.join(missing)}" if missing else ""
+        raise CliError(f"--columns must name columns of {args.data}{detail}")
     catalog = Catalog.load(args.catalog) if args.catalog else None
     tokenizer = _tokenizer(args)
     changed = 0
@@ -231,7 +235,7 @@ def cmd_retokenize(args: argparse.Namespace) -> int:
         decision = catalog.get(column, table=args.table) if catalog else None
         domain = decision.token_domain if decision else column
         new = [tokenizer.retokenize(t, column=domain) for t in data[column]]
-        changed += sum(1 for old, t in zip(data[column], new) if old != t)
+        changed += sum(1 for old, t in zip(data[column], new, strict=True) if old != t)
         data[column] = new
     _write_csv(args.output, {c: data[c] for c in header})
     print(f"colgov: re-issued {changed} token(s) under key {tokenizer.keyring.primary_id}", file=sys.stderr)
@@ -265,21 +269,24 @@ def _read_csv(path: str, *, header_only: bool = False) -> tuple[list[str], dict[
         for lineno, row in enumerate(reader, start=2):
             if len(row) != len(header):
                 raise CliError(f"{path}, line {lineno}: expected {len(header)} fields, got {len(row)}")
-            for column, value in zip(header, row):
+            for column, value in zip(header, row, strict=True):
                 data[column].append(value if value != "" else None)
     return header, data
 
 
-def _write_csv(path: str, view: dict[str, list]) -> None:
-    out = sys.stdout if path == "-" else open(path, "w", newline="", encoding="utf-8")
-    try:
-        writer = csv.writer(out)
-        writer.writerow(view.keys())
-        for row in zip(*view.values()):
-            writer.writerow("" if v is None else v for v in row)
-    finally:
-        if out is not sys.stdout:
-            out.close()
+def _write_csv(path: str, view: dict[str, list[Any]]) -> None:
+    if path == "-":
+        _write_rows(sys.stdout, view)
+    else:
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            _write_rows(f, view)
+
+
+def _write_rows(out: TextIO, view: dict[str, list[Any]]) -> None:
+    writer = csv.writer(out)
+    writer.writerow(view.keys())
+    for row in zip(*view.values(), strict=True):
+        writer.writerow("" if v is None else v for v in row)
 
 
 def _tokenizer(args: argparse.Namespace) -> Tokenizer:
@@ -349,8 +356,12 @@ def _parser() -> argparse.ArgumentParser:
     table_arg(p)
     key_args(p)
     p.add_argument("-o", "--output", default="-", help="output CSV file (default: stdout)")
-    p.add_argument("--min-distinct", type=int, default=colgov.DEFAULT_MIN_DISTINCT,
-                   help="refuse to tokenize columns with fewer distinct values (default: %(default)s)")
+    p.add_argument(
+        "--min-distinct",
+        type=int,
+        default=colgov.DEFAULT_MIN_DISTINCT,
+        help="refuse to tokenize columns with fewer distinct values (default: %(default)s)",
+    )
     p.add_argument("--audit", help="append a record of this view to a JSONL audit log")
     p.add_argument("--actor", help="who is running this (required with --audit)")
 

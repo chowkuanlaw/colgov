@@ -11,9 +11,7 @@ def tok() -> Tokenizer:
 
 
 def test_same_value_same_column_gives_same_token(tok):
-    assert tok.tokenize("ada@example.com", column="email") == tok.tokenize(
-        "ada@example.com", column="email"
-    )
+    assert tok.tokenize("ada@example.com", column="email") == tok.tokenize("ada@example.com", column="email")
 
 
 def test_tokens_stable_across_instances():
@@ -26,9 +24,7 @@ def test_known_answer_vectors(tok):
     # Pins the v2 token format: header (version + key id), HKDF info label,
     # AES-SIV with the header as associated data, base64url.
     # If this fails, previously stored tokens would no longer join.
-    assert tok.tokenize("ada@example.com", column="email") == (
-        "AuJGWyYRMapTELLSbPYEdRLVTLsVKGm7wB_HW7FxW1f823EsqQ"
-    )
+    assert tok.tokenize("ada@example.com", column="email") == ("AuJGWyYRMapTELLSbPYEdRLVTLsVKGm7wB_HW7FxW1f823EsqQ")
     assert tok.tokenize("", column="email") == "AuJGWyY3HkPlqP3Z1dWjA8UOzX13SQ"
 
 
@@ -44,9 +40,7 @@ def test_reads_v1_tokens(tok):
         tok.detokenize(V1_ADA, column="phone")
 
 
-@pytest.mark.parametrize(
-    "value", ["ada@example.com", "", " ", "Zoë Ñúñez", "李小龍", "a" * 10_000, "x\x00y"]
-)
+@pytest.mark.parametrize("value", ["ada@example.com", "", " ", "Zoë Ñúñez", "李小龍", "a" * 10_000, "x\x00y"])
 def test_round_trip(tok, value):
     token = tok.tokenize(value, column="name")
     assert tok.detokenize(token, column="name") == value
@@ -67,9 +61,7 @@ def test_different_master_keys_give_different_tokens():
 
 def test_token_is_url_and_sql_safe(tok):
     token = tok.tokenize("ada@example.com?&=/+", column="email")
-    assert set(token) <= set(
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-    )
+    assert set(token) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 
 def test_none_passes_through(tok):
@@ -91,7 +83,7 @@ def test_detokenize_with_wrong_key_fails(tok):
 
 def test_tampered_token_fails(tok):
     token = tok.tokenize("ada@example.com", column="email")
-    flipped = ("A" if token[5] != "A" else "B")
+    flipped = "A" if token[5] != "A" else "B"
     tampered = token[:5] + flipped + token[6:]
     with pytest.raises(InvalidToken):
         tok.detokenize(tampered, column="email")

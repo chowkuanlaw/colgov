@@ -132,9 +132,7 @@ class Policy:
 
     # --- resolution ---------------------------------------------------------
 
-    def resolve(
-        self, role: str, column: str, catalog: Catalog, *, table: str | None = None
-    ) -> Resolution:
+    def resolve(self, role: str, column: str, catalog: Catalog, *, table: str | None = None) -> Resolution:
         """Decide how ``column`` (of ``table``) is shown to ``role``.
 
         Anything unclear is denied.
@@ -156,9 +154,7 @@ class Policy:
         """Resolve every column in ``columns`` for ``role``."""
         return [self.resolve(role, c, catalog, table=table) for c in columns]
 
-    def may_detokenize(
-        self, role: str, column: str, catalog: Catalog, *, table: str | None = None
-    ) -> tuple[bool, str]:
+    def may_detokenize(self, role: str, column: str, catalog: Catalog, *, table: str | None = None) -> tuple[bool, str]:
         """Whether ``role`` may detokenize ``column``, and why (or why not)."""
         found = self._lookup(role, column, catalog, table)
         if isinstance(found, Resolution):

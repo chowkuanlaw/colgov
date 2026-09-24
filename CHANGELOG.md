@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Security documentation:**
+  - `SECURITY.md`, covering private vulnerability reporting
+  - a threat model (`docs/threat-model.md`) setting out guarantees, known
+    limitations and the cryptographic details
+  - an API stability policy (`docs/stability.md`)
+- **Documentation site** built with MkDocs and mkdocstrings, published to
+  GitHub Pages by the new `Docs` workflow.
+- **Stricter CI:**
+  - `ruff` linting and format checks
+  - `mypy --strict` over the package
+  - the docs site built with `--strict`
+- **New extras:** `dev` and `docs`.
+
+### Changed
+
+- **Code formatted with `ruff format`.**
+- **Mismatched column lengths are now an error.** Internal `zip` calls use
+  `strict=True`, so columns of different lengths raise instead of being
+  silently cut short.
+
 ## 0.3.0 — unreleased
 
 Stored tokens and policies need a small migration. See **Upgrading from

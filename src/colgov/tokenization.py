@@ -32,7 +32,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from colgov.risk import DEFAULT_MIN_DISTINCT, LowCardinalityError, column_risk
 
-__all__ = ["InvalidToken", "Keyring", "Tokenizer", "MIN_MASTER_KEY_BYTES"]
+__all__ = ["MIN_MASTER_KEY_BYTES", "InvalidToken", "Keyring", "Tokenizer"]
 
 MIN_MASTER_KEY_BYTES = 32
 """Smallest master key accepted, in bytes (256 bits)."""
@@ -70,9 +70,7 @@ def _check_key(key: object) -> bytes:
     if not isinstance(key, (bytes, bytearray)):
         raise TypeError("master keys must be bytes")
     if len(key) < MIN_MASTER_KEY_BYTES:
-        raise ValueError(
-            f"master keys must be at least {MIN_MASTER_KEY_BYTES} bytes, got {len(key)}"
-        )
+        raise ValueError(f"master keys must be at least {MIN_MASTER_KEY_BYTES} bytes, got {len(key)}")
     return bytes(key)
 
 
@@ -282,7 +280,7 @@ class Tokenizer:
             return None
         if not plaintext.startswith(_V2_PAD):
             return None
-        return plaintext[len(_V2_PAD):].decode("utf-8")
+        return plaintext[len(_V2_PAD) :].decode("utf-8")
 
     def _try_v1(self, raw: bytes, column: str) -> str | None:
         # v1 tokens don't name their key, so try each key in turn.
@@ -292,7 +290,7 @@ class Tokenizer:
             except (InvalidTag, ValueError):
                 continue
             if plaintext.startswith(_V1_MARKER):
-                return plaintext[len(_V1_MARKER):].decode("utf-8")
+                return plaintext[len(_V1_MARKER) :].decode("utf-8")
         return None
 
     @staticmethod
@@ -316,4 +314,3 @@ class Tokenizer:
             cipher = AESSIV(_hkdf(key, _V1_HKDF_INFO + column.encode("utf-8"), _DOMAIN_KEY_BYTES))
             self._v1[(kid, column)] = cipher
         return cipher
-
