@@ -1,9 +1,36 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-09-24
+
+Stored tokens and policies need a small migration. See **Upgrading from
+0.2** below.
+
+### Breaking
+
+- **Token format v2.** Tokens now carry a key ID (`0x02 || key_id ||
+  AES-SIV(...)`), so the same value tokenizes differently from 0.2. Tokens
+  from 0.1–0.2 are still accepted by `detokenize`; re-issue them with
+  `Tokenizer.retokenize` or `colgov retokenize`.
+- **Detokenizing needs an explicit grant.** Use `{view: ..., detokenize:
+  true}`. Seeing a column in `clear` no longer implies it.
+- **Renamed argument.** `Policy.apply`'s first argument is now `data`, and
+  `table=` names the catalog table.
+- **Catalog file version 2.** Catalogs are written as `version: 2`, which
+  colgov 0.2 cannot read. Version 1 files still load.
 
 ### Added
 
+- **`Keyring`:** a primary key plus older keys for reading. Also
+  `Keyring.key_id`, `Tokenizer.retokenize` and `Tokenizer.is_current`.
+- **`colgov.keys`:** `load_key` and `load_keyring` for key specs, AWS KMS
+  envelope keys (`aws-kms:...`, `generate_aws_kms_key`) and the
+  `colgov[aws]` extra.
+- **Tables in catalogs:** `table=` on `Catalog`, `Policy`, `colgov.pandas`
+  and `colgov.spark`, with no fallback between tables. Decisions can carry a
+  `domain` to choose which columns join.
+- **Detokenize grants:** `Grant` and `Policy.may_detokenize`.
+- **CLI:** `--table`, `retokenize`, `keygen --aws-kms-key-id`, keyring files
+  with the primary key first, and `plan` showing detokenize grants.
 - **Security documentation:**
   - `SECURITY.md`, covering private vulnerability reporting
   - a threat model (`docs/threat-model.md`) setting out guarantees, known
@@ -43,38 +70,6 @@
 - **Mismatched column lengths are now an error.** Internal `zip` calls use
   `strict=True`, so columns of different lengths raise instead of being
   silently cut short.
-
-## 0.3.0 — unreleased
-
-Stored tokens and policies need a small migration. See **Upgrading from
-0.2** below.
-
-### Breaking
-
-- **Token format v2.** Tokens now carry a key ID (`0x02 || key_id ||
-  AES-SIV(...)`), so the same value tokenizes differently from 0.2. Tokens
-  from 0.1–0.2 are still accepted by `detokenize`; re-issue them with
-  `Tokenizer.retokenize` or `colgov retokenize`.
-- **Detokenizing needs an explicit grant.** Use `{view: ..., detokenize:
-  true}`. Seeing a column in `clear` no longer implies it.
-- **Renamed argument.** `Policy.apply`'s first argument is now `data`, and
-  `table=` names the catalog table.
-- **Catalog file version 2.** Catalogs are written as `version: 2`, which
-  colgov 0.2 cannot read. Version 1 files still load.
-
-### Added
-
-- **`Keyring`:** a primary key plus older keys for reading. Also
-  `Keyring.key_id`, `Tokenizer.retokenize` and `Tokenizer.is_current`.
-- **`colgov.keys`:** `load_key` and `load_keyring` for key specs, AWS KMS
-  envelope keys (`aws-kms:...`, `generate_aws_kms_key`) and the
-  `colgov[aws]` extra.
-- **Tables in catalogs:** `table=` on `Catalog`, `Policy`, `colgov.pandas`
-  and `colgov.spark`, with no fallback between tables. Decisions can carry a
-  `domain` to choose which columns join.
-- **Detokenize grants:** `Grant` and `Policy.may_detokenize`.
-- **CLI:** `--table`, `retokenize`, `keygen --aws-kms-key-id`, keyring files
-  with the primary key first, and `plan` showing detokenize grants.
 
 ### Upgrading from 0.2
 
