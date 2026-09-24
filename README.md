@@ -42,7 +42,7 @@ default, to tokenize columns whose cardinality is too low to protect.
 ## Usage
 
 ```bash
-pip install "git+https://github.com/chowkuanlaw/colgov"   # until v0.1.0 is on PyPI
+pip install colgov
 ```
 
 ```python
