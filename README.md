@@ -6,7 +6,7 @@ Tokenize a column and it stays joinable. Same plaintext, same token — every
 time, across tables and across runs — so `JOIN`, `GROUP BY` and
 `COUNT(DISTINCT)` keep working on data nobody can read.
 
-> **Status: alpha (`0.1.0`).** Every v0.1 feature is in place. The API may
+> **Status: alpha (`0.2.0`).** Every v0.1 and v0.2 feature is in place. The API may
 > still change before 1.0. See [CHANGELOG.md](CHANGELOG.md).
 
 ## The problem
@@ -175,13 +175,100 @@ all rejected when the pack loads. The built-in `core` pack covers email,
 phone numbers, names, national IDs, dates of birth, postal codes, street
 addresses, IP addresses and payment cards.
 
-## Planned for v0.1
+### Detokenization, with an audit trail
+
+A role may turn tokens back into plaintext only for columns it could already
+see in `clear`. The rules are the same fail-closed ones as for views, so
+there is nothing extra to configure. Every attempt is recorded before any
+plaintext is returned, whether it was allowed, denied or failed. Each
+record names who asked, why, and how many values were involved.
+
+```python
+from colgov import AccessDenied, JsonlAuditLog
+
+audit = JsonlAuditLog("audit.jsonl")
+policy.detokenize(
+    tokens, column="customer_email", role="support", catalog=catalog,
+    tokenizer=t, actor="carol", purpose="TICKET-4521", audit=audit,
+)                          # ['ada@example.com', ...]
+
+policy.detokenize(tokens, column="customer_email", role="analyst", ...)
+# AccessDenied: role 'analyst' may not detokenize 'customer_email' ...
+```
+
+- **Actor and purpose are required.** If the audit log can't be written,
+  no plaintext is returned.
+- **Audit records never contain data,** neither plaintext nor tokens.
+- **The log is tamper-evident.** `JsonlAuditLog` chains every line to the
+  one before it with SHA-256. `verify_audit_log("audit.jsonl")` (or
+  `colgov audit verify`) finds any line that was edited, deleted or
+  reordered.
+- **Views can be audited too.** Pass `audit=` and `actor=` to
+  `policy.apply`.
+
+### pandas and PySpark
+
+```bash
+pip install "colgov[pandas]"   # or "colgov[spark]"
+```
+
+```python
+from colgov import pandas as cpd
+
+suggestions = cpd.classify(df)
+view = cpd.apply(df, policy, role="analyst", catalog=catalog, tokenizer=t)
+plain = cpd.detokenize(view["customer_email"], policy, role="support", catalog=catalog,
+                       tokenizer=t, actor="carol", purpose="TICKET-4521", audit=audit)
+
+from colgov import spark as cspark
+
+view = cspark.apply(sdf, policy, role="analyst", catalog=catalog, tokenizer=t)  # lazy DataFrame
+```
+
+- **pandas:** the index and the dtypes of `clear` columns are kept. `None`,
+  `NaN` and `pd.NA` all count as null.
+- **Spark:** tokenization runs in a UDF on the executors, and the
+  cardinality check is a single aggregation. The master key is shipped to
+  the executors, so colgov must be installed there, and you should only use
+  a cluster you trust with the key.
+- **Both:** tokenized columns must hold strings, so cast other types first.
+
+### Command line
+
+```bash
+colgov keygen                                   # new master key (base64)
+export COLGOV_MASTER_KEY=...                    # or pass --key-file
+
+colgov classify customers.csv                   # suggestions per column
+colgov review customers.csv -c catalog.yaml --by alice
+                                                # decide interactively; saved after every answer
+colgov plan customers.csv -p policy.yaml -c catalog.yaml --role analyst
+                                                # what the role would see, and why
+colgov apply customers.csv -p policy.yaml -c catalog.yaml --role analyst -o analyst.csv \
+             --audit audit.jsonl --actor bob
+colgov detokenize -p policy.yaml -c catalog.yaml --role support --column customer_email \
+                  --actor carol --purpose TICKET-4521 --audit audit.jsonl < tokens.txt
+colgov audit verify audit.jsonl
+```
+
+`review` shows suggestions and the evidence for them, but never the
+column's values. In the CSV files, empty cells are treated as nulls.
+
+## Roadmap
+
+**v0.1**
 
 - [x] Deterministic reversible tokenization with per-column key derivation (HKDF)
 - [x] Column classification from portable YAML rule packs
 - [x] Human review workflow — a machine suggests, a person decides
 - [x] Fail-closed policy resolution: an unclassified column is never visible
 - [x] Re-identification risk scoring (cardinality, k-anonymity)
+
+**v0.2**
+
+- [x] Policy-governed detokenization with a tamper-evident audit log
+- [x] pandas and PySpark helpers
+- [x] `colgov` command-line tool
 
 ## Scope
 

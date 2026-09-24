@@ -4,7 +4,15 @@ policy for tabular PII.
 See https://github.com/chowkuanlaw/colgov
 """
 
-from colgov.policy import Policy, PolicyError, Resolution, Treatment
+from colgov.audit import (
+    AuditEvent,
+    AuditLog,
+    AuditLogError,
+    JsonlAuditLog,
+    MemoryAuditLog,
+    verify_audit_log,
+)
+from colgov.policy import AccessDenied, Policy, PolicyError, Resolution, Treatment
 from colgov.review import Catalog, CatalogError, Decision
 from colgov.risk import (
     DEFAULT_MIN_DISTINCT,
@@ -17,20 +25,26 @@ from colgov.risk import (
 from colgov.rules import PUBLIC, Label, Rule, RulePack, RulePackError, Suggestion
 from colgov.tokenization import MIN_MASTER_KEY_BYTES, InvalidToken, Tokenizer
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "__version__",
     "DEFAULT_MIN_DISTINCT",
     "MIN_MASTER_KEY_BYTES",
     "PUBLIC",
+    "AccessDenied",
+    "AuditEvent",
+    "AuditLog",
+    "AuditLogError",
     "Catalog",
     "CatalogError",
     "ColumnRisk",
     "Decision",
     "InvalidToken",
+    "JsonlAuditLog",
     "KAnonymity",
     "Label",
     "LowCardinalityError",
+    "MemoryAuditLog",
     "Policy",
     "PolicyError",
     "Resolution",
@@ -42,4 +56,5 @@ __all__ = [
     "Treatment",
     "column_risk",
     "k_anonymity",
+    "verify_audit_log",
 ]
