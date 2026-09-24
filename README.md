@@ -7,7 +7,7 @@ time, across tables and across runs — so `JOIN`, `GROUP BY` and
 `COUNT(DISTINCT)` keep working on data nobody can read.
 
 > **Status: alpha (`0.3.0`).** Every v0.1–v0.3 feature is in place. The API may
-> still change before 1.0. See [CHANGELOG.md](CHANGELOG.md).
+> still change before 1.0. See [CHANGELOG.md](https://github.com/chowkuanlaw/colgov/blob/main/CHANGELOG.md).
 
 ## The problem
 
@@ -358,9 +358,9 @@ detector feeding `colgov`'s classification.
 
 ## Security
 
-Read the [threat model](docs/threat-model.md) before using colgov with real
+Read the [threat model](https://github.com/chowkuanlaw/colgov/blob/main/docs/threat-model.md) before using colgov with real
 personal data. Report vulnerabilities privately as described in
-[SECURITY.md](SECURITY.md). The [API stability policy](docs/stability.md)
+[SECURITY.md](https://github.com/chowkuanlaw/colgov/blob/main/SECURITY.md). The [API stability policy](https://github.com/chowkuanlaw/colgov/blob/main/docs/stability.md)
 explains what will stay compatible from 1.0.
 
 ## License
