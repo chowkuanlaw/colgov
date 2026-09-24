@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "colgov"
-version = "1.0.0rc1"
+version = "1.0.0"
 description = "Deterministic, reversible tokenization and fail-closed access policy for tabular PII."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,7 +21,7 @@ keywords = [
     "column-level-security",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Programming Language :: Python :: 3",

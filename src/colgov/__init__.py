@@ -28,7 +28,7 @@ from colgov.risk import (
 from colgov.rules import PUBLIC, Label, Rule, RulePack, RulePackError, Suggestion
 from colgov.tokenization import MIN_MASTER_KEY_BYTES, InvalidToken, Keyring, Tokenizer
 
-__version__ = "1.0.0rc1"
+__version__ = "1.0.0"
 __all__ = [
     "DEFAULT_MIN_DISTINCT",
     "MIN_MASTER_KEY_BYTES",

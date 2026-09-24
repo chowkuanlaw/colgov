@@ -6,10 +6,10 @@ Tokenize a column and it stays joinable. Same plaintext, same token — every
 time, across tables and across runs — so `JOIN`, `GROUP BY` and
 `COUNT(DISTINCT)` keep working on data nobody can read.
 
-> **Status: release candidate (`1.0.0rc1`).** The public API and file formats
-> are frozen for 1.0: see the [stability policy](https://github.com/chowkuanlaw/colgov/blob/main/docs/stability.md).
-> Install it with `pip install --pre colgov`. Please report anything that
-> should change before 1.0.0. See [CHANGELOG.md](https://github.com/chowkuanlaw/colgov/blob/main/CHANGELOG.md).
+> **Status: stable (`1.0.0`).** The public API and file formats follow
+> Semantic Versioning: see the [stability policy](https://github.com/chowkuanlaw/colgov/blob/main/docs/stability.md).
+> The cryptographic design has not yet had an independent review. Read the
+> [threat model](https://github.com/chowkuanlaw/colgov/blob/main/docs/threat-model.md) before relying on it. See [CHANGELOG.md](https://github.com/chowkuanlaw/colgov/blob/main/CHANGELOG.md).
 
 ## The problem
 
@@ -348,8 +348,12 @@ column's values. In the CSV files, empty cells are treated as nulls.
 - [x] Streaming CLI, Arrow-based Spark UDF, benchmarks
 - [x] Property-based and fuzz tests, coverage gate
 - [x] 1.0.0 release candidate (`1.0.0rc1`)
+- [x] 1.0.0
+
+**After 1.0**
+
 - [ ] Independent review of the cryptographic design
-- [ ] Feedback from real use, then 1.0.0
+- [ ] Optional Presidio bridge for value-shape detection
 
 ## Scope
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.0 — 2026-09-24
+
+First stable release. The code is identical to 1.0.0rc1. From this release,
+colgov follows Semantic Versioning, and the public API and file formats in
+the [stability policy](https://chowkuanlaw.github.io/colgov/stability/) change only in a new major release.
+
+Upgrading from 0.3.0 or 1.0.0rc1 needs no changes: tokens, catalogs,
+policies, keyrings and audit logs all work as they are. Upgrading from 0.2
+or earlier: see **Upgrading from 0.2** under 0.3.0.
+
+The cryptographic design has not yet had an independent review. See the
+[threat model](https://chowkuanlaw.github.io/colgov/threat-model/).
+
+### Changed
+
+- **Development status** on PyPI is now "Production/Stable".
+- **Security support** now covers the latest 1.x minor release; see
+  `SECURITY.md`.
+
 ## 1.0.0rc1 — 2026-09-24
 
 First release candidate for 1.0.0. The public API and file formats listed
