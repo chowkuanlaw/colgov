@@ -6,8 +6,8 @@ Tokenize a column and it stays joinable. Same plaintext, same token — every
 time, across tables and across runs — so `JOIN`, `GROUP BY` and
 `COUNT(DISTINCT)` keep working on data nobody can read.
 
-> **Status: alpha (`0.2.0`).** Every v0.1 and v0.2 feature is in place. The API may
-> still change before 1.0. See [CHANGELOG.md](CHANGELOG.md).
+> **Status: alpha (`0.3.0`).** Every v0.1–v0.3 feature is in place. The API may
+> still change before 1.0. See [CHANGELOG.md](https://github.com/chowkuanlaw/colgov/blob/main/CHANGELOG.md).
 
 ## The problem
 
@@ -58,14 +58,41 @@ t.tokenize(None, column="email")      # None — NULL stays NULL
 ```
 
 - **One key per column.** Each column's AES-256-SIV key is derived from the
-  master key with HKDF-SHA256, using the column name as context. The same
-  value in two different columns gives unrelated tokens, so you can't join
-  tables on a column the policy didn't mean to link.
+  master key with HKDF-SHA256, using the column name (its *token domain*) as
+  context. The same value in two different domains gives unrelated tokens,
+  so you can't join tables on a column the policy didn't mean to link.
+- **Tokens name their key.** Each token starts with a key ID, so master keys
+  can be rotated (see below).
 - **Tokens are URL- and SQL-safe.** They use unpadded base64url (`A–Z a–z 0–9 - _`).
 - **Tampering is detected.** `detokenize` raises `colgov.InvalidToken` when a
   token was changed or was made with a different key or column.
 - **Lose the master key and the tokens can't be reversed.** Anyone who has
   the key can reverse every token.
+
+### Rotating keys, and keeping them in AWS KMS
+
+```python
+from colgov import Keyring, Tokenizer
+
+t = Tokenizer(Keyring(new_key, previous=[old_key]))
+t.tokenize("ada@example.com", column="email")        # made with new_key
+t.detokenize(old_token, column="email")              # old_key tokens still read
+t.retokenize(old_token, column="email")              # re-issued under new_key
+t.is_current(token)                                  # header check, no decryption
+```
+
+- **Tokens depend on the key.** After rotating, the same value gets a new
+  token, so migrate stored tokens with `retokenize` (or
+  `colgov retokenize`) before joining old data with new.
+- **Keys can live in AWS KMS.** `colgov keygen --aws-kms-key-id alias/colgov`
+  prints an `aws-kms:...` spec. That is a data key encrypted by KMS, and it's
+  safe to keep in configuration. It is decrypted with `kms:Decrypt` only
+  when loaded. Install with `pip install "colgov[aws]"`.
+- **Keyring specs:** `load_keyring(text)`, `$COLGOV_MASTER_KEY` and
+  `--key-file` all take key specs, one per line or comma-separated, with the
+  primary key first.
+- **Tokens from colgov 0.1–0.2 still read.** They have no key ID, so each
+  key in the keyring is tried. `retokenize` upgrades them.
 
 ### Refusing columns too predictable to protect
 
@@ -177,9 +204,19 @@ addresses, IP addresses and payment cards.
 
 ### Detokenization, with an audit trail
 
-A role may turn tokens back into plaintext only for columns it could already
-see in `clear`. The rules are the same fail-closed ones as for views, so
-there is nothing extra to configure. Every attempt is recorded before any
+Detokenizing is its own permission. It is granted per label with the long
+form of a grant, and seeing a column in `clear` does **not** imply it:
+
+```yaml
+roles:
+  support:
+    email: clear                                  # sees plaintext; can't detokenize
+  fraud:
+    email: {view: tokenize, detokenize: true}     # works on tokens; may reverse them
+```
+
+The same fail-closed checks apply as for views: the role must be known, the
+column reviewed, and the label granted. Every attempt is recorded before any
 plaintext is returned, whether it was allowed, denied or failed. Each
 record names who asked, why, and how many values were involved.
 
@@ -188,7 +225,7 @@ from colgov import AccessDenied, JsonlAuditLog
 
 audit = JsonlAuditLog("audit.jsonl")
 policy.detokenize(
-    tokens, column="customer_email", role="support", catalog=catalog,
+    tokens, column="customer_email", role="fraud", catalog=catalog,
     tokenizer=t, actor="carol", purpose="TICKET-4521", audit=audit,
 )                          # ['ada@example.com', ...]
 
@@ -205,6 +242,25 @@ policy.detokenize(tokens, column="customer_email", role="analyst", ...)
   reordered.
 - **Views can be audited too.** Pass `audit=` and `actor=` to
   `policy.apply`.
+
+### Several tables in one catalog
+
+Decisions are keyed by table and column, so `customers.id` and `orders.id`
+are reviewed separately. A decision never covers a table it wasn't made for:
+there is no fallback from a table to table-less decisions.
+
+```python
+catalog.decide("email", "email", by="alice", table="customers")
+catalog.decide("buyer_email", "email", by="alice", table="orders", domain="email")
+
+policy.apply(customers, role="analyst", catalog=catalog, table="customers", tokenizer=t)
+policy.apply(orders, role="analyst", catalog=catalog, table="orders", tokenizer=t)
+# customers.email and orders.buyer_email share the "email" token domain, so they join.
+```
+
+A column's token domain defaults to its name, so same-named columns join
+across tables. Set `domain=` to join differently named columns, or to keep
+same-named columns apart. The CLI takes `--table` for the same purpose.
 
 ### pandas and PySpark
 
@@ -237,7 +293,8 @@ view = cspark.apply(sdf, policy, role="analyst", catalog=catalog, tokenizer=t)  
 
 ```bash
 colgov keygen                                   # new master key (base64)
-export COLGOV_MASTER_KEY=...                    # or pass --key-file
+colgov keygen --aws-kms-key-id alias/colgov     # ...or one protected by AWS KMS
+export COLGOV_MASTER_KEY=...                    # or --key-file (primary first, older keys after)
 
 colgov classify customers.csv                   # suggestions per column
 colgov review customers.csv -c catalog.yaml --by alice
@@ -248,8 +305,13 @@ colgov apply customers.csv -p policy.yaml -c catalog.yaml --role analyst -o anal
              --audit audit.jsonl --actor bob
 colgov detokenize -p policy.yaml -c catalog.yaml --role support --column customer_email \
                   --actor carol --purpose TICKET-4521 --audit audit.jsonl < tokens.txt
+colgov retokenize analyst.csv --columns customer_email -o migrated.csv
+                                                # after rotating keys
 colgov audit verify audit.jsonl
 ```
+
+Add `--table customers` to `review`, `plan`, `apply` and `detokenize` to use
+that table's catalog decisions.
 
 `review` shows suggestions and the evidence for them, but never the
 column's values. In the CSV files, empty cells are treated as nulls.
@@ -270,6 +332,22 @@ column's values. In the CSV files, empty cells are treated as nulls.
 - [x] pandas and PySpark helpers
 - [x] `colgov` command-line tool
 
+**v0.3**
+
+- [x] Key rotation: key IDs in tokens, keyrings, `retokenize`, AWS KMS
+- [x] Catalogs keyed by table, with configurable token domains
+- [x] Detokenizing as a separate, explicitly granted permission
+
+**Road to 1.0**
+
+- [x] `ruff`, `mypy --strict`, docs site, API stability policy
+- [x] `SECURITY.md` and threat model
+- [x] Audit log shared by several processes; `logging` and multi-log sinks
+- [x] Streaming CLI, Arrow-based Spark UDF, benchmarks
+- [x] Property-based and fuzz tests, coverage gate
+- [ ] Independent review of the cryptographic design
+- [ ] 1.0.0 release candidate, then feedback from real use
+
 ## Scope
 
 `colgov` governs **columns in tabular data**. It does not detect PII inside
@@ -277,6 +355,13 @@ free-text prose — for that, use
 [Presidio](https://github.com/data-privacy-stack/presidio), which is excellent
 at it. An optional bridge is planned so Presidio can act as a value-shape
 detector feeding `colgov`'s classification.
+
+## Security
+
+Read the [threat model](https://github.com/chowkuanlaw/colgov/blob/main/docs/threat-model.md) before using colgov with real
+personal data. Report vulnerabilities privately as described in
+[SECURITY.md](https://github.com/chowkuanlaw/colgov/blob/main/SECURITY.md). The [API stability policy](https://github.com/chowkuanlaw/colgov/blob/main/docs/stability.md)
+explains what will stay compatible from 1.0.
 
 ## License
 

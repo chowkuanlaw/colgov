@@ -5,9 +5,9 @@ import pytest
 
 pytest.importorskip("pyspark")
 
-from pyspark.sql import SparkSession  # noqa: E402
+from pyspark.sql import SparkSession
 
-from colgov import (  # noqa: E402
+from colgov import (
     PUBLIC,
     Catalog,
     LowCardinalityError,
@@ -16,7 +16,7 @@ from colgov import (  # noqa: E402
     PolicyError,
     Tokenizer,
 )
-from colgov import spark as cspark  # noqa: E402
+from colgov import spark as cspark
 
 KEY = bytes(range(32))
 
@@ -121,3 +121,27 @@ def test_apply_audit(sdf, policy, catalog, tok):
     assert event.columns == ("customer_email", "amount")
     with pytest.raises(PolicyError, match="actor"):
         cspark.apply(sdf, policy, role="analyst", catalog=catalog, tokenizer=tok, audit=audit)
+
+
+def test_apply_uses_table_and_domain(spark, tok):
+    cat = Catalog()
+    cat.decide("buyer_email", "email", by="alice", table="orders", domain="email")
+    sdf = spark.createDataFrame([(f"u{i}@x.com",) for i in range(12)], "buyer_email string")
+    policy = Policy({"a": {"email": "tokenize"}})
+    out = cspark.apply(sdf, policy, role="a", catalog=cat, table="orders", tokenizer=tok)
+    assert out.first()[0] == tok.tokenize("u0@x.com", column="email")
+    assert cspark.apply(sdf, policy, role="a", catalog=cat, tokenizer=tok).columns == []
+
+
+@pytest.mark.parametrize("arrow", [True, False])
+def test_apply_row_and_arrow_udfs_agree(spark, catalog, policy, tok, monkeypatch, arrow):
+    if arrow:
+        pytest.importorskip("pyarrow")
+        pytest.importorskip("pandas")
+    monkeypatch.setattr(cspark, "_arrow_available", lambda: arrow)
+    rows = [(f"user{i}@example.com", float(i), "n/a") for i in range(30)] + [(None, 0.0, "n/a")]
+    sdf = spark.createDataFrame(rows, "customer_email string, amount double, notes string").repartition(3)
+    out = cspark.apply(sdf, policy, role="analyst", catalog=catalog, tokenizer=tok)
+    got = sorted((r.customer_email or "") for r in out.collect())
+    expected = sorted((tok.tokenize(v, column="customer_email") or "") for v, _, _ in rows)
+    assert got == expected

@@ -11,9 +11,7 @@ def tok() -> Tokenizer:
 
 
 def test_same_value_same_column_gives_same_token(tok):
-    assert tok.tokenize("ada@example.com", column="email") == tok.tokenize(
-        "ada@example.com", column="email"
-    )
+    assert tok.tokenize("ada@example.com", column="email") == tok.tokenize("ada@example.com", column="email")
 
 
 def test_tokens_stable_across_instances():
@@ -23,17 +21,26 @@ def test_tokens_stable_across_instances():
 
 
 def test_known_answer_vectors(tok):
-    # Pins the token format: HKDF info label, AES-SIV, v1 header, base64url.
+    # Pins the v2 token format: header (version + key id), HKDF info label,
+    # AES-SIV with the header as associated data, base64url.
     # If this fails, previously stored tokens would no longer join.
-    assert tok.tokenize("ada@example.com", column="email") == (
-        "dEmr4UrbAT3YC8v2o0S4Uuf_L06ueUs51KdWaw0Y8YQ"
-    )
-    assert tok.tokenize("", column="email") == "CSkCe6Fq2YiboG1Blv4dhrw"
+    assert tok.tokenize("ada@example.com", column="email") == ("AuJGWyYRMapTELLSbPYEdRLVTLsVKGm7wB_HW7FxW1f823EsqQ")
+    assert tok.tokenize("", column="email") == "AuJGWyY3HkPlqP3Z1dWjA8UOzX13SQ"
 
 
-@pytest.mark.parametrize(
-    "value", ["ada@example.com", "", " ", "Zoë Ñúñez", "李小龍", "a" * 10_000, "x\x00y"]
-)
+# Tokens produced by colgov 0.1-0.2 (format v1) with KEY.
+V1_ADA = "dEmr4UrbAT3YC8v2o0S4Uuf_L06ueUs51KdWaw0Y8YQ"
+V1_EMPTY = "CSkCe6Fq2YiboG1Blv4dhrw"
+
+
+def test_reads_v1_tokens(tok):
+    assert tok.detokenize(V1_ADA, column="email") == "ada@example.com"
+    assert tok.detokenize(V1_EMPTY, column="email") == ""
+    with pytest.raises(InvalidToken):
+        tok.detokenize(V1_ADA, column="phone")
+
+
+@pytest.mark.parametrize("value", ["ada@example.com", "", " ", "Zoë Ñúñez", "李小龍", "a" * 10_000, "x\x00y"])
 def test_round_trip(tok, value):
     token = tok.tokenize(value, column="name")
     assert tok.detokenize(token, column="name") == value
@@ -54,9 +61,7 @@ def test_different_master_keys_give_different_tokens():
 
 def test_token_is_url_and_sql_safe(tok):
     token = tok.tokenize("ada@example.com?&=/+", column="email")
-    assert set(token) <= set(
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-    )
+    assert set(token) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 
 def test_none_passes_through(tok):
@@ -78,7 +83,7 @@ def test_detokenize_with_wrong_key_fails(tok):
 
 def test_tampered_token_fails(tok):
     token = tok.tokenize("ada@example.com", column="email")
-    flipped = ("A" if token[5] != "A" else "B")
+    flipped = "A" if token[5] != "A" else "B"
     tampered = token[:5] + flipped + token[6:]
     with pytest.raises(InvalidToken):
         tok.detokenize(tampered, column="email")
@@ -124,3 +129,10 @@ def test_non_string_values_rejected(tok, value):
 def test_invalid_column_rejected(tok, column):
     with pytest.raises(ValueError):
         tok.tokenize("x", column=column)  # type: ignore[arg-type]
+
+
+def test_tokenize_many_matches_tokenize(tok):
+    values = ["a", None, "", "李", "a"]
+    assert tok.tokenize_many(values, column="c") == [tok.tokenize(v, column="c") for v in values]
+    with pytest.raises(TypeError):
+        tok.tokenize_many(["a", 1], column="c")

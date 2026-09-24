@@ -5,6 +5,9 @@ the executors, so the :class:`colgov.Tokenizer` (and its master key) is
 shipped to them with the job. Run it only on a cluster you trust with the
 key, and prefer a key from your secret manager over one in a notebook.
 colgov must be installed on the executors as well as the driver.
+
+With ``pyarrow`` installed, tokenization uses a vectorized (Arrow) UDF,
+which avoids per-row Python overhead; without it, a row UDF is used.
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ try:
     from pyspark.sql.types import StringType
 except ImportError as exc:  # pragma: no cover - exercised only without pyspark
     raise ImportError('colgov.spark needs PySpark: pip install "colgov[spark]"') from exc
+
+from typing import Any, cast
 
 from colgov.audit import AuditLog
 from colgov.policy import (
@@ -59,6 +64,7 @@ def apply(
     *,
     role: str,
     catalog: Catalog,
+    table: str | None = None,
     tokenizer: Tokenizer | None = None,
     min_distinct: int = DEFAULT_MIN_DISTINCT,
     audit: AuditLog | None = None,
@@ -79,7 +85,7 @@ def apply(
         raise ValueError("column names must be unique")
     if audit is not None:
         _require_text(actor, "actor")
-    plan = policy.plan(role, sdf.columns, catalog)
+    plan = policy.plan(role, sdf.columns, catalog, table=table)
     try:
         out = _build(sdf, plan, role, tokenizer, min_distinct)
     except Exception as exc:
@@ -104,9 +110,7 @@ def _build(
     types = dict(sdf.dtypes)
     for column in to_tokenize:
         if types[column] != "string":
-            raise TypeError(
-                f"column {column!r} is {types[column]}, not string; cast it before tokenizing"
-            )
+            raise TypeError(f"column {column!r} is {types[column]}, not string; cast it before tokenizing")
     _check_cardinality(sdf, to_tokenize, min_distinct)
 
     selected = []
@@ -114,7 +118,8 @@ def _build(
         if r.treatment is Treatment.CLEAR:
             selected.append(F.col(_quote(r.column)))
         elif r.treatment is Treatment.TOKENIZE:
-            selected.append(_tokenize_udf(tokenizer, r.column)(F.col(_quote(r.column))).alias(r.column))  # type: ignore[arg-type]
+            udf = _tokenize_udf(tokenizer, r.domain or r.column)  # type: ignore[arg-type]
+            selected.append(udf(F.col(_quote(r.column))).alias(r.column))
     return sdf.select(*selected)
 
 
@@ -122,6 +127,8 @@ def _check_cardinality(sdf: DataFrame, columns: list[str], min_distinct: int) ->
     if not columns:
         return
     counts = sdf.agg(*[F.countDistinct(F.col(_quote(c))).alias(f"_{i}") for i, c in enumerate(columns)]).first()
+    if counts is None:  # pragma: no cover - a global aggregation always returns one row
+        return
     for i, column in enumerate(columns):
         n_distinct = counts[i]
         if 0 < n_distinct < min_distinct:
@@ -143,9 +150,32 @@ def _small_column_risk(sdf: DataFrame, column: str) -> ColumnRisk:
     )
 
 
-def _tokenize_udf(tokenizer: Tokenizer, column: str):
+def _arrow_available() -> bool:
+    try:
+        import pandas  # noqa: F401
+        import pyarrow  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _tokenize_udf(tokenizer: Tokenizer, column: str) -> Any:
+    """A vectorized (Arrow) UDF when pandas and pyarrow are installed, else a row UDF."""
+    if _arrow_available():
+        import pandas as pd
+        from pyspark.sql.pandas.functions import pandas_udf
+
+        def tokenize_batch(values: pd.Series) -> pd.Series:
+            batch = [None if v is None or v != v else v for v in values]  # v != v: NaN
+            return pd.Series(tokenizer.tokenize_many(batch, column=column), index=values.index, dtype=object)
+
+        # Spark reads the type hints to pick the UDF kind; with postponed
+        # evaluation they are strings it can't resolve, so set them directly.
+        tokenize_batch.__annotations__ = {"values": pd.Series, "return": pd.Series}
+        return cast(Any, pandas_udf)(tokenize_batch, StringType())
+
     # No type hints: Spark would try to infer an Arrow (pandas) UDF from them.
-    def tokenize(value):
+    def tokenize(value):  # type: ignore[no-untyped-def]
         return tokenizer.tokenize(value, column=column)
 
     return F.udf(tokenize, StringType())

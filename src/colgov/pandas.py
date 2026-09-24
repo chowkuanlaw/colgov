@@ -52,6 +52,7 @@ def apply(
     *,
     role: str,
     catalog: Catalog,
+    table: str | None = None,
     tokenizer: Tokenizer | None = None,
     min_distinct: int = DEFAULT_MIN_DISTINCT,
     audit: AuditLog | None = None,
@@ -65,7 +66,7 @@ def apply(
     _check_columns(df)
     if audit is not None:
         _require_text(actor, "actor")
-    plan = policy.plan(role, list(df.columns), catalog)
+    plan = policy.plan(role, list(df.columns), catalog, table=table)
     try:
         out = _build(df, plan, role, tokenizer, min_distinct)
     except Exception as exc:
@@ -86,13 +87,13 @@ def _build(
 ) -> pd.DataFrame:
     if tokenizer is None and any(r.treatment is Treatment.TOKENIZE for r in plan):
         raise PolicyError(f"role {role!r} needs a tokenizer to view this table")
-    out = pd.DataFrame(index=df.index)
+    out: pd.DataFrame = pd.DataFrame(index=df.index)
     for r in plan:
         if r.treatment is Treatment.CLEAR:
             out[r.column] = df[r.column]
         elif r.treatment is Treatment.TOKENIZE:
             tokens = tokenizer.tokenize_column(  # type: ignore[union-attr]
-                _values(df[r.column]), column=r.column, min_distinct=min_distinct
+                _values(df[r.column]), column=r.domain or r.column, min_distinct=min_distinct
             )
             out[r.column] = pd.Series(tokens, index=df.index, dtype=object)
     return out
@@ -109,17 +110,20 @@ def detokenize(
     purpose: str,
     audit: AuditLog,
     column: str | None = None,
+    table: str | None = None,
 ) -> pd.Series:
     """Detokenize a Series under :meth:`colgov.Policy.detokenize`.
 
     ``column`` defaults to the Series name.
     """
-    column = column if column is not None else tokens.name
+    if column is None:
+        column = tokens.name if isinstance(tokens.name, str) else None
     if not isinstance(column, str) or not column:
         raise ValueError("pass column=... or give the Series a name")
     plaintext = policy.detokenize(
         _values(tokens),
         column=column,
+        table=table,
         role=role,
         catalog=catalog,
         tokenizer=tokenizer,
@@ -132,7 +136,8 @@ def detokenize(
 
 def _values(series: pd.Series) -> list[Any]:
     """Series values as a list, with every kind of missing value as None."""
-    return series.astype(object).where(series.notna(), None).tolist()
+    values: list[Any] = series.astype(object).where(series.notna(), None).tolist()
+    return values
 
 
 def _check_columns(df: pd.DataFrame) -> None:

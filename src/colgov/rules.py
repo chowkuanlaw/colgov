@@ -187,10 +187,7 @@ class RulePack:
         Only the first ``sample_size`` non-null values are examined. Values
         are compared as stripped strings.
         """
-        sample = [
-            str(v).strip()
-            for v in itertools.islice((v for v in values if v is not None), sample_size)
-        ]
+        sample = [str(v).strip() for v in itertools.islice((v for v in values if v is not None), sample_size)]
         best: dict[str, Suggestion] = {}
         for rule in self.rules:
             evidence = _match(rule, column, sample)
@@ -198,15 +195,13 @@ class RulePack:
                 continue
             prev = best.get(rule.label)
             if prev is None:
-                best[rule.label] = Suggestion(
-                    column, rule.label, rule.confidence, (rule.id,), evidence
-                )
+                best[rule.label] = Suggestion(column, rule.label, rule.confidence, (rule.id,), evidence)
             else:
                 best[rule.label] = Suggestion(
                     column,
                     rule.label,
                     max(prev.confidence, rule.confidence),
-                    prev.rule_ids + (rule.id,),
+                    (*prev.rule_ids, rule.id),
                     prev.evidence + evidence,
                 )
         return sorted(best.values(), key=lambda s: (-s.confidence, s.label))
@@ -219,8 +214,7 @@ class RulePack:
     ) -> dict[str, list[Suggestion]]:
         """Suggest labels for every column of ``table`` (column name -> values)."""
         return {
-            column: self.classify_column(column, values, sample_size=sample_size)
-            for column, values in table.items()
+            column: self.classify_column(column, values, sample_size=sample_size) for column, values in table.items()
         }
 
 
@@ -240,6 +234,8 @@ def _parse_rule(spec: dict[str, Any], pack: str, index: int, labels: Mapping[str
         raise RulePackError(f"{where}: needs 'column_name', 'value_pattern', or both")
 
     confidence = _ratio(spec, "confidence", where, required=True)
+    if confidence is None:  # pragma: no cover - required=True raises instead
+        raise RulePackError(f"{where}: 'confidence' is required")
     min_match_ratio = _ratio(spec, "min_match_ratio", where, required=False)
     if min_match_ratio is not None and value_pattern is None:
         raise RulePackError(f"{where}: 'min_match_ratio' needs 'value_pattern'")
@@ -250,9 +246,7 @@ def _parse_rule(spec: dict[str, Any], pack: str, index: int, labels: Mapping[str
         confidence=confidence,
         column_name=column_name,
         value_pattern=value_pattern,
-        min_match_ratio=(
-            DEFAULT_MIN_MATCH_RATIO if min_match_ratio is None else min_match_ratio
-        ),
+        min_match_ratio=(DEFAULT_MIN_MATCH_RATIO if min_match_ratio is None else min_match_ratio),
     )
 
 

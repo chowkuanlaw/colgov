@@ -1,5 +1,92 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Security documentation:**
+  - `SECURITY.md`, covering private vulnerability reporting
+  - a threat model (`docs/threat-model.md`) setting out guarantees, known
+    limitations and the cryptographic details
+  - an API stability policy (`docs/stability.md`)
+- **Documentation site** built with MkDocs and mkdocstrings, published to
+  GitHub Pages by the new `Docs` workflow.
+- **Stricter CI:**
+  - `ruff` linting and format checks
+  - `mypy --strict` over the package
+  - the docs site built with `--strict`
+- **New extras:** `dev` and `docs`.
+- **Audit log with several writers.** `JsonlAuditLog` can take appends from
+  several processes: each write takes an exclusive `flock` and re-reads the
+  last hash, so the chain never forks.
+- **More audit destinations.** `LoggingAuditLog` sends events to Python
+  `logging`, and from there to syslog or a SIEM. `MultiAuditLog` writes to
+  several logs and fails if any one fails.
+- **`Tokenizer.tokenize_many`:** batch tokenization, about 20% faster than
+  a loop.
+- **Faster Spark.** `colgov.spark` uses a vectorized Arrow UDF when
+  `pyarrow` is installed, about 5× faster than the row UDF.
+- **Streaming CLI:**
+  - `colgov apply` makes one pass to check the file and one to write, with
+    bounded memory. The audit record is written before any output, and
+    output files are replaced atomically.
+  - `retokenize` also streams.
+  - `classify` and `review` read only the sample rows they need.
+- **Testing and benchmarks:**
+  - property-based and fuzz tests with Hypothesis
+  - a coverage gate at 95% in CI
+  - `benchmarks/bench.py` and a performance page in the docs
+
+### Changed
+
+- **Code formatted with `ruff format`.**
+- **Mismatched column lengths are now an error.** Internal `zip` calls use
+  `strict=True`, so columns of different lengths raise instead of being
+  silently cut short.
+
+## 0.3.0 — unreleased
+
+Stored tokens and policies need a small migration. See **Upgrading from
+0.2** below.
+
+### Breaking
+
+- **Token format v2.** Tokens now carry a key ID (`0x02 || key_id ||
+  AES-SIV(...)`), so the same value tokenizes differently from 0.2. Tokens
+  from 0.1–0.2 are still accepted by `detokenize`; re-issue them with
+  `Tokenizer.retokenize` or `colgov retokenize`.
+- **Detokenizing needs an explicit grant.** Use `{view: ..., detokenize:
+  true}`. Seeing a column in `clear` no longer implies it.
+- **Renamed argument.** `Policy.apply`'s first argument is now `data`, and
+  `table=` names the catalog table.
+- **Catalog file version 2.** Catalogs are written as `version: 2`, which
+  colgov 0.2 cannot read. Version 1 files still load.
+
+### Added
+
+- **`Keyring`:** a primary key plus older keys for reading. Also
+  `Keyring.key_id`, `Tokenizer.retokenize` and `Tokenizer.is_current`.
+- **`colgov.keys`:** `load_key` and `load_keyring` for key specs, AWS KMS
+  envelope keys (`aws-kms:...`, `generate_aws_kms_key`) and the
+  `colgov[aws]` extra.
+- **Tables in catalogs:** `table=` on `Catalog`, `Policy`, `colgov.pandas`
+  and `colgov.spark`, with no fallback between tables. Decisions can carry a
+  `domain` to choose which columns join.
+- **Detokenize grants:** `Grant` and `Policy.may_detokenize`.
+- **CLI:** `--table`, `retokenize`, `keygen --aws-kms-key-id`, keyring files
+  with the primary key first, and `plan` showing detokenize grants.
+
+### Upgrading from 0.2
+
+1. **Policies:** for each role that should reverse tokens, change
+   `label: clear` to `label: {view: clear, detokenize: true}`.
+2. **Stored tokens:** re-issue them. Run `colgov retokenize data.csv
+   --columns a,b -o out.csv`, or call `Tokenizer.retokenize` in your
+   pipeline. Until you do, 0.2 tokens and 0.3 tokens for the same value
+   won't match in joins.
+3. **Code:** if you call `policy.apply(table=...)` by keyword, rename the
+   argument to `data=`.
+
 ## 0.2.0 — 2026-09-24
 
 ### Added

@@ -125,8 +125,14 @@ def test_events_never_contain_data(tmp_path):
     policy, catalog = _setup()
     path = tmp_path / "audit.jsonl"
     policy.detokenize(
-        [token], column="email", role="support", catalog=catalog, tokenizer=tok,
-        actor="alice", purpose="TICKET-1", audit=JsonlAuditLog(path),
+        [token],
+        column="email",
+        role="support",
+        catalog=catalog,
+        tokenizer=tok,
+        actor="alice",
+        purpose="TICKET-1",
+        audit=JsonlAuditLog(path),
     )
     text = path.read_text()
     assert "ada@example.com" not in text
@@ -137,7 +143,12 @@ def test_events_never_contain_data(tmp_path):
 
 
 def _setup():
-    policy = Policy({"support": {"email": "clear"}, "analyst": {"email": "tokenize"}})
+    policy = Policy(
+        {
+            "support": {"email": {"view": "clear", "detokenize": True}},
+            "analyst": {"email": "tokenize"},
+        }
+    )
     catalog = Catalog()
     catalog.decide("email", "email", by="reviewer")
     catalog.decide("amount", PUBLIC, by="reviewer")
@@ -147,8 +158,13 @@ def _setup():
 def _detok(tokens, role="support", column="email", audit=None, **overrides):
     policy, catalog = _setup()
     kwargs = dict(
-        column=column, role=role, catalog=catalog, tokenizer=Tokenizer(KEY),
-        actor="alice", purpose="TICKET-1", audit=audit if audit is not None else MemoryAuditLog(),
+        column=column,
+        role=role,
+        catalog=catalog,
+        tokenizer=Tokenizer(KEY),
+        actor="alice",
+        purpose="TICKET-1",
+        audit=audit if audit is not None else MemoryAuditLog(),
     )
     kwargs.update(overrides)
     return policy.detokenize(tokens, **kwargs)
@@ -162,14 +178,17 @@ def test_detokenize_allowed_for_clear_role():
     [event] = audit.events
     assert (event.outcome, event.action, event.count) == ("allowed", "detokenize", 2)
     assert (event.actor, event.role, event.columns, event.purpose) == (
-        "alice", "support", ("email",), "TICKET-1",
+        "alice",
+        "support",
+        ("email",),
+        "TICKET-1",
     )
 
 
 @pytest.mark.parametrize(
     "role, column, reason",
     [
-        ("analyst", "email", "grants tokenize"),
+        ("analyst", "email", "no detokenize grant"),
         ("intern", "email", "unknown role"),
         ("support", "notes", "not been reviewed"),
     ],
@@ -233,8 +252,9 @@ def test_apply_records_failures():
     policy, catalog = _setup()
     audit = MemoryAuditLog()
     with pytest.raises(LowCardinalityError):
-        policy.apply({"email": ["a", "b"]}, role="analyst", catalog=catalog,
-                     tokenizer=Tokenizer(KEY), audit=audit, actor="bob")
+        policy.apply(
+            {"email": ["a", "b"]}, role="analyst", catalog=catalog, tokenizer=Tokenizer(KEY), audit=audit, actor="bob"
+        )
     assert [e.outcome for e in audit.events] == ["error"]
 
 
@@ -259,5 +279,58 @@ def test_tokenizer_pickles_without_cipher_cache():
     token = tok.tokenize("x", column="c")  # populates the cache
     clone = pickle.loads(pickle.dumps(tok))
     assert clone.tokenize("x", column="c") == token
-    assert "master key hidden" in repr(tok)
+    assert "master keys hidden" in repr(tok)
     assert KEY.hex() not in repr(tok)
+
+
+# --- concurrency and other sinks (0.4) ---------------------------------------------
+
+
+def _write_events(path, worker, n):
+    log = JsonlAuditLog(path)
+    for i in range(n):
+        log.record(_event(actor=f"w{worker}", count=i))
+
+
+def test_jsonl_log_is_safe_across_processes(tmp_path):
+    import multiprocessing as mp
+
+    path = tmp_path / "audit.jsonl"
+    ctx = mp.get_context("spawn")
+    procs = [ctx.Process(target=_write_events, args=(str(path), w, 100)) for w in range(8)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+        assert p.exitcode == 0
+    assert verify_audit_log(path) == 800
+
+
+def test_logging_audit_log(caplog):
+    import json as _json
+    import logging
+
+    from colgov import LoggingAuditLog
+
+    with caplog.at_level(logging.INFO, logger="colgov.audit"):
+        LoggingAuditLog().record(_event())
+    [record] = caplog.records
+    assert record.name == "colgov.audit"
+    assert _json.loads(record.getMessage())["actor"] == "alice"
+
+
+def test_multi_audit_log_writes_all_and_propagates_failures(tmp_path):
+    from colgov import MultiAuditLog
+
+    a, b = MemoryAuditLog(), MemoryAuditLog()
+    MultiAuditLog(a, b).record(_event())
+    assert len(a.events) == len(b.events) == 1
+
+    class Broken:
+        def record(self, event):
+            raise OSError("down")
+
+    with pytest.raises(OSError):
+        MultiAuditLog(a, Broken()).record(_event())
+    with pytest.raises(ValueError):
+        MultiAuditLog()

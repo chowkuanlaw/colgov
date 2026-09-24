@@ -195,4 +195,139 @@ def test_suggest_review_resolve_end_to_end(tokenizer):
 
     assert list(view) == ["customer_email", "order_total"]
     assert view["order_total"] == table["order_total"]
-    assert all(t != v for t, v in zip(view["customer_email"], table["customer_email"]))
+    assert all(t != v for t, v in zip(view["customer_email"], table["customer_email"], strict=True))
+
+
+# --- grants, detokenize permission, tables and domains (0.3) ----------------------
+
+from colgov import AccessDenied, Grant, MemoryAuditLog  # noqa: E402
+
+
+def test_long_form_grants():
+    p = Policy.from_yaml(
+        "roles:\n"
+        "  fraud:\n    email: {view: tokenize, detokenize: true}\n"
+        "  lookup:\n    email: {detokenize: true}\n"
+        "  viewer:\n    email: {view: clear}\n"
+    )
+    cat = Catalog()
+    cat.decide("email", "email", by="a")
+    assert p.resolve("fraud", "email", cat).treatment is Treatment.TOKENIZE
+    assert p.resolve("lookup", "email", cat).treatment is Treatment.DENY  # view defaults to deny
+    assert p.may_detokenize("fraud", "email", cat)[0]
+    assert p.may_detokenize("lookup", "email", cat)[0]
+    allowed, reason = p.may_detokenize("viewer", "email", cat)
+    assert not allowed and "no detokenize grant" in reason
+
+
+def test_grant_objects_accepted():
+    p = Policy({"r": {"email": Grant(view=Treatment.CLEAR, detokenize=True)}})
+    cat = Catalog()
+    cat.decide("email", "email", by="a")
+    assert p.may_detokenize("r", "email", cat)[0]
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ("roles: {a: {email: {view: show}}}", "unknown treatment"),
+        ("roles: {a: {email: {detokenize: yes please}}}", "true or false"),
+        ("roles: {a: {email: {view: clear, export: true}}}", "unknown keys"),
+    ],
+)
+def test_invalid_grants_rejected(text, message):
+    with pytest.raises(PolicyError, match=message):
+        Policy.from_yaml(text)
+
+
+@pytest.mark.parametrize(
+    "role, column, reason",
+    [("intern", "email", "unknown role"), ("fraud", "notes", "not been reviewed"), ("fraud", "phone", "no grant")],
+)
+def test_may_detokenize_fails_closed(role, column, reason):
+    p = Policy({"fraud": {"email": {"view": "tokenize", "detokenize": True}}})
+    cat = Catalog()
+    cat.decide("email", "email", by="a")
+    cat.decide("phone", "phone_number", by="a")
+    allowed, why = p.may_detokenize(role, column, cat)
+    assert not allowed and reason in why
+
+
+def test_public_columns_are_not_detokenizable_by_default():
+    cat = Catalog()
+    cat.decide("amount", PUBLIC, by="a")
+    assert not Policy({"r": {}}).may_detokenize("r", "amount", cat)[0]
+
+
+def test_clear_view_no_longer_implies_detokenize(tokenizer):
+    p = Policy({"support": {"email": "clear"}})
+    cat = Catalog()
+    cat.decide("email", "email", by="a")
+    audit = MemoryAuditLog()
+    with pytest.raises(AccessDenied, match="no detokenize grant"):
+        p.detokenize(
+            [tokenizer.tokenize("a@x.com", column="email")],
+            column="email",
+            role="support",
+            catalog=cat,
+            tokenizer=tokenizer,
+            actor="c",
+            purpose="p",
+            audit=audit,
+        )
+    assert audit.events[0].outcome == "denied"
+
+
+def test_tables_resolve_independently(tokenizer):
+    p = Policy({"analyst": {"email": "tokenize"}})
+    cat = Catalog()
+    cat.decide("contact", "email", by="a", table="customers")
+    cat.decide("contact", PUBLIC, by="a", table="vendors")
+    assert p.resolve("analyst", "contact", cat, table="customers").treatment is Treatment.TOKENIZE
+    assert p.resolve("analyst", "contact", cat, table="vendors").treatment is Treatment.CLEAR
+    assert p.resolve("analyst", "contact", cat).treatment is Treatment.DENY
+    r = p.resolve("analyst", "contact", cat, table="customers")
+    assert (r.table, r.domain) == ("customers", "contact")
+
+
+def test_domains_join_differently_named_columns(tokenizer):
+    p = Policy({"analyst": {"email": "tokenize"}})
+    cat = Catalog()
+    cat.decide("email", "email", by="a", table="customers")
+    cat.decide("buyer_email", "email", by="a", table="orders", domain="email")
+    emails = [f"u{i}@x.com" for i in range(12)]
+    customers = p.apply({"email": emails}, role="analyst", catalog=cat, table="customers", tokenizer=tokenizer)
+    orders = p.apply({"buyer_email": emails}, role="analyst", catalog=cat, table="orders", tokenizer=tokenizer)
+    assert customers["email"] == orders["buyer_email"]
+
+
+def test_detokenize_uses_domain_and_table(tokenizer):
+    p = Policy({"fraud": {"email": {"view": "tokenize", "detokenize": True}}})
+    cat = Catalog()
+    cat.decide("buyer_email", "email", by="a", table="orders", domain="email")
+    token = tokenizer.tokenize("a@x.com", column="email")
+    audit = MemoryAuditLog()
+    out = p.detokenize(
+        [token],
+        column="buyer_email",
+        table="orders",
+        role="fraud",
+        catalog=cat,
+        tokenizer=tokenizer,
+        actor="c",
+        purpose="p",
+        audit=audit,
+    )
+    assert out == ["a@x.com"]
+    assert audit.events[0].columns == ("orders.buyer_email",)
+    with pytest.raises(AccessDenied, match="not been reviewed"):
+        p.detokenize(
+            [token],
+            column="buyer_email",
+            role="fraud",
+            catalog=cat,
+            tokenizer=tokenizer,
+            actor="c",
+            purpose="p",
+            audit=audit,
+        )

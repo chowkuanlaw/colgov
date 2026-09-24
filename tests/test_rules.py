@@ -156,7 +156,9 @@ def _rule(**fields):
     ],
 )
 def test_invalid_packs_rejected(data, message):
-    with pytest.raises(RulePackError, match=message.replace("(", r"\(").replace(")", r"\)").replace("[", r"\[").replace("]", r"\]")):
+    with pytest.raises(
+        RulePackError, match=message.replace("(", r"\(").replace(")", r"\)").replace("[", r"\[").replace("]", r"\]")
+    ):
         RulePack.from_dict(data)
 
 

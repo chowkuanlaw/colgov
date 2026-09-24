@@ -10,12 +10,16 @@ why and how many values.
 :class:`JsonlAuditLog` writes one JSON object per line and chains each
 record to the previous one with SHA-256. Editing, deleting or reordering an
 earlier line breaks the chain, which :func:`verify_audit_log` detects.
+:class:`LoggingAuditLog` forwards events to Python ``logging`` (and from
+there to syslog, a SIEM, ...), and :class:`MultiAuditLog` writes to several
+logs at once.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -28,7 +32,9 @@ __all__ = [
     "AuditLog",
     "AuditLogError",
     "JsonlAuditLog",
+    "LoggingAuditLog",
     "MemoryAuditLog",
+    "MultiAuditLog",
     "verify_audit_log",
 ]
 
@@ -92,23 +98,64 @@ class JsonlAuditLog:
 
     Each line holds the event plus ``prev`` (the previous line's hash) and
     ``hash`` (SHA-256 over this line's canonical JSON without ``hash``).
-    Designed for a single writer; concurrent writers would fork the chain.
+
+    Several processes may append to the same file: each write takes an
+    exclusive ``flock`` and re-reads the last hash under it, so the chain
+    never forks. (On platforms without ``fcntl``, such as Windows, use one
+    writer per file.) Every record is ``fsync``-ed before ``record``
+    returns.
     """
 
     def __init__(self, path: str | PathLike[str]) -> None:
         self.path = os.fspath(path)
-        self._last_hash = _last_hash(self.path)
+        _last_hash(self.path)  # fail now, not mid-request, on a corrupt log
 
     def record(self, event: AuditEvent) -> None:
-        entry = event.to_dict()
-        entry["prev"] = self._last_hash
-        entry["hash"] = _entry_hash(entry)
-        line = json.dumps(entry, sort_keys=True, ensure_ascii=False)
         with open(self.path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        self._last_hash = entry["hash"]
+            _lock(f)
+            try:
+                entry = event.to_dict()
+                entry["prev"] = _last_hash(self.path)
+                entry["hash"] = _entry_hash(entry)
+                f.write(json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                _unlock(f)
+
+
+class LoggingAuditLog:
+    """Sends each event as one JSON message to a :mod:`logging` logger.
+
+    Route the logger to syslog, a SIEM or a log shipper with ordinary
+    logging handlers. Logging does not report delivery failures, so pair it
+    with a durable log in a :class:`MultiAuditLog` when events must not be
+    lost.
+    """
+
+    def __init__(self, logger: logging.Logger | str = "colgov.audit", level: int = logging.INFO) -> None:
+        self.logger = logging.getLogger(logger) if isinstance(logger, str) else logger
+        self.level = level
+
+    def record(self, event: AuditEvent) -> None:
+        self.logger.log(self.level, json.dumps(event.to_dict(), sort_keys=True, ensure_ascii=False))
+
+
+class MultiAuditLog:
+    """Records every event in each of several logs, in order.
+
+    If any log raises, the error propagates, so callers withhold data unless
+    every log accepted the event.
+    """
+
+    def __init__(self, *logs: AuditLog) -> None:
+        if not logs:
+            raise ValueError("MultiAuditLog needs at least one log")
+        self.logs = logs
+
+    def record(self, event: AuditEvent) -> None:
+        for log in self.logs:
+            log.record(event)
 
 
 def verify_audit_log(path: str | PathLike[str]) -> int:
@@ -163,6 +210,24 @@ def record_event(
     )
 
 
+try:
+    import fcntl
+
+    def _lock(f: Any) -> None:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+
+    def _unlock(f: Any) -> None:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+except ImportError:  # pragma: no cover - Windows
+
+    def _lock(f: Any) -> None:
+        pass
+
+    def _unlock(f: Any) -> None:
+        pass
+
+
 def _entry_hash(entry: dict[str, Any]) -> str:
     body = {k: v for k, v in entry.items() if k != "hash"}
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -192,6 +257,9 @@ def _last_hash(path: str) -> str:
     except FileNotFoundError:
         return _GENESIS
     try:
-        return json.loads(last)["hash"]
+        last_hash = json.loads(last)["hash"]
+        if not isinstance(last_hash, str):
+            raise TypeError("hash is not a string")
+        return last_hash
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise AuditLogError(f"{path}: last line is not a valid audit entry") from exc

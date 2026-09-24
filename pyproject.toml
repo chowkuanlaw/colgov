@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "colgov"
-version = "0.2.0"
+version = "0.3.0"
 description = "Deterministic, reversible tokenization and fail-closed access policy for tabular PII."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,6 +39,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+aws = [
+    "boto3>=1.26",
+]
 pandas = [
     "pandas>=2.0",
 ]
@@ -47,6 +50,20 @@ spark = [
 ]
 test = [
     "pytest>=7",
+    "pytest-cov>=4",
+    "hypothesis>=6",
+]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "types-PyYAML",
+    "pandas-stubs",
+    "boto3-stubs",
+]
+docs = [
+    "mkdocs>=1.6,<2",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
 ]
 
 [project.scripts]
@@ -63,3 +80,32 @@ packages = ["src/colgov"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "src"]
 addopts = "--doctest-modules"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F",   # pycodestyle, pyflakes
+    "I",             # import sorting
+    "B",             # bugbear
+    "UP",            # pyupgrade
+    "SIM",           # simplify
+    "DTZ",           # timezone-aware datetimes
+    "S",             # bandit rules
+    "RUF",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108", "S301", "E501", "E731", "SIM115", "DTZ001", "RUF059"]
+
+[tool.mypy]
+strict = true
+files = ["src/colgov"]
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["pyspark.*", "moto.*", "pyarrow.*"]
+ignore_missing_imports = true

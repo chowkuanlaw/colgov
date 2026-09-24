@@ -9,6 +9,30 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev,pandas,spark,aws]"
+      - run: ruff check src tests
+      - run: ruff format --check src tests
+      - run: mypy
+
+  docs:
+    name: Build docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[docs]"
+      - run: mkdocs build --strict
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -27,8 +51,8 @@ jobs:
           java-version: "17"
       # Editable install: doctests are collected from src/, so the tests
       # must import the same copy of the package.
-      - run: python -m pip install -e ".[test,pandas,spark]"
-      - run: python -m pytest
+      - run: python -m pip install -e ".[test,pandas,spark,aws]" "moto[kms]" pyarrow
+      - run: python -m pytest --cov=colgov --cov-report=term-missing --cov-fail-under=95
 
   test-minimum-deps:
     name: Test (minimum dependency versions)

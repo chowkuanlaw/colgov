@@ -39,7 +39,7 @@ def catalog():
 
 @pytest.fixture
 def policy():
-    return Policy({"analyst": {"email": "tokenize"}, "support": {"email": "clear"}})
+    return Policy({"analyst": {"email": "tokenize"}, "support": {"email": {"view": "clear", "detokenize": True}}})
 
 
 @pytest.fixture
@@ -58,9 +58,7 @@ def test_apply_tokenizes_keeps_index_and_dtypes(df, policy, catalog, tok):
     assert list(out.columns) == ["customer_email", "amount"]
     assert list(out.index) == list(df.index)
     assert out["amount"].dtype == df["amount"].dtype
-    assert out["customer_email"].tolist() == [
-        tok.tokenize(v, column="customer_email") for v in df["customer_email"]
-    ]
+    assert out["customer_email"].tolist() == [tok.tokenize(v, column="customer_email") for v in df["customer_email"]]
 
 
 def test_apply_does_not_modify_input(df, policy, catalog, tok):
@@ -136,8 +134,14 @@ def test_detokenize_round_trip(df, policy, catalog, tok):
     tokens = cpd.apply(df, policy, role="analyst", catalog=catalog, tokenizer=tok)["customer_email"]
     audit = MemoryAuditLog()
     plain = cpd.detokenize(
-        tokens, policy, role="support", catalog=catalog, tokenizer=tok,
-        actor="carol", purpose="TICKET-9", audit=audit,
+        tokens,
+        policy,
+        role="support",
+        catalog=catalog,
+        tokenizer=tok,
+        actor="carol",
+        purpose="TICKET-9",
+        audit=audit,
     )
     pd.testing.assert_series_equal(plain, df["customer_email"].astype(object))
     assert audit.events[0].count == 12
@@ -146,11 +150,48 @@ def test_detokenize_round_trip(df, policy, catalog, tok):
 def test_detokenize_denied(df, policy, catalog, tok):
     tokens = cpd.apply(df, policy, role="analyst", catalog=catalog, tokenizer=tok)["customer_email"]
     with pytest.raises(AccessDenied):
-        cpd.detokenize(tokens, policy, role="analyst", catalog=catalog, tokenizer=tok,
-                       actor="bob", purpose="curious", audit=MemoryAuditLog())
+        cpd.detokenize(
+            tokens,
+            policy,
+            role="analyst",
+            catalog=catalog,
+            tokenizer=tok,
+            actor="bob",
+            purpose="curious",
+            audit=MemoryAuditLog(),
+        )
 
 
 def test_detokenize_needs_column_name(policy, catalog, tok):
     with pytest.raises(ValueError, match="column"):
-        cpd.detokenize(pd.Series(["x"]), policy, role="support", catalog=catalog, tokenizer=tok,
-                       actor="a", purpose="b", audit=MemoryAuditLog())
+        cpd.detokenize(
+            pd.Series(["x"]),
+            policy,
+            role="support",
+            catalog=catalog,
+            tokenizer=tok,
+            actor="a",
+            purpose="b",
+            audit=MemoryAuditLog(),
+        )
+
+
+def test_apply_and_detokenize_with_table_and_domain(tok):
+    cat = Catalog()
+    cat.decide("buyer_email", "email", by="alice", table="orders", domain="email")
+    policy = Policy({"fraud": {"email": {"view": "tokenize", "detokenize": True}}})
+    df = pd.DataFrame({"buyer_email": [f"u{i}@x.com" for i in range(12)]})
+    out = cpd.apply(df, policy, role="fraud", catalog=cat, table="orders", tokenizer=tok)
+    assert out["buyer_email"].iloc[0] == tok.tokenize("u0@x.com", column="email")
+    back = cpd.detokenize(
+        out["buyer_email"],
+        policy,
+        role="fraud",
+        catalog=cat,
+        table="orders",
+        tokenizer=tok,
+        actor="c",
+        purpose="p",
+        audit=MemoryAuditLog(),
+    )
+    assert back.tolist() == df["buyer_email"].tolist()
