@@ -338,6 +338,16 @@ column's values. In the CSV files, empty cells are treated as nulls.
 - [x] Catalogs keyed by table, with configurable token domains
 - [x] Detokenizing as a separate, explicitly granted permission
 
+**Road to 1.0**
+
+- [x] `ruff`, `mypy --strict`, docs site, API stability policy
+- [x] `SECURITY.md` and threat model
+- [x] Audit log shared by several processes; `logging` and multi-log sinks
+- [x] Streaming CLI, Arrow-based Spark UDF, benchmarks
+- [x] Property-based and fuzz tests, coverage gate
+- [ ] Independent review of the cryptographic design
+- [ ] 1.0.0 release candidate, then feedback from real use
+
 ## Scope
 
 `colgov` governs **columns in tabular data**. It does not detect PII inside

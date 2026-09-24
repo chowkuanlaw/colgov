@@ -29,18 +29,21 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import csv
 import os
 import sys
-from collections.abc import Callable, Sequence
-from typing import Any, TextIO
+import tempfile
+from collections import Counter
+from collections.abc import Callable, Iterator, Sequence
+from typing import TextIO
 
 import colgov
 from colgov.audit import AuditLogError, JsonlAuditLog, verify_audit_log
 from colgov.keys import KeySpecError, generate_aws_kms_key, load_keyring
-from colgov.policy import Policy, PolicyError
+from colgov.policy import Policy, PolicyError, Treatment, record_view, summarize
 from colgov.review import Catalog, CatalogError
-from colgov.risk import LowCardinalityError
+from colgov.risk import ColumnRisk, LowCardinalityError
 from colgov.rules import PUBLIC, RulePack, RulePackError
 from colgov.tokenization import InvalidToken, Tokenizer
 
@@ -92,7 +95,7 @@ def cmd_keygen(args: argparse.Namespace) -> int:
 
 
 def cmd_classify(args: argparse.Namespace) -> int:
-    header, data = _read_csv(args.data)
+    header, data = _read_csv(args.data, limit=args.sample_size)
     suggestions = _pack(args.pack).classify(data, sample_size=args.sample_size)
     for column in header:
         found = suggestions[column]
@@ -114,7 +117,7 @@ def cmd_review(
     if not args.by.strip():
         raise CliError("--by must name the reviewer")
     pack = _pack(args.pack)
-    header, data = _read_csv(args.data)
+    header, data = _read_csv(args.data, limit=args.sample_size)
     catalog = Catalog.load(args.catalog) if os.path.exists(args.catalog) else Catalog()
     pending = catalog.pending(header, table=args.table)
     if not pending:
@@ -165,7 +168,7 @@ def cmd_review(
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    header, _ = _read_csv(args.data, header_only=True)
+    header = _read_header(args.data)
     policy, catalog = Policy.load(args.policy), Catalog.load(args.catalog)
     width = max(len(c) for c in header)
     for r in policy.plan(args.role, header, catalog, table=args.table):
@@ -175,24 +178,42 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
+    """Stream the role's view: one pass to check, one pass to write.
+
+    Memory stays bounded whatever the file size: the first pass counts
+    rows and distinct values (stopping at --min-distinct per column), and
+    the second tokenizes row by row.
+    """
     if args.audit and not args.actor:
         raise CliError("--audit needs --actor")
-    header, data = _read_csv(args.data)
+    header = _read_header(args.data)
     policy, catalog = Policy.load(args.policy), Catalog.load(args.catalog)
     plan = policy.plan(args.role, header, catalog, table=args.table)
-    needs_key = any(r.treatment.value == "tokenize" for r in plan)
-    view = policy.apply(
-        data,
-        role=args.role,
-        catalog=catalog,
-        table=args.table,
-        tokenizer=_tokenizer(args) if needs_key else None,
-        min_distinct=args.min_distinct,
-        audit=JsonlAuditLog(args.audit) if args.audit else None,
-        actor=args.actor,
-    )
-    _write_csv(args.output, view)
-    denied = [c for c in header if c not in view]
+    tokenized = [r for r in plan if r.treatment is Treatment.TOKENIZE]
+    tokenizer = _tokenizer(args) if tokenized else None
+    audit = JsonlAuditLog(args.audit) if args.audit else None
+    try:
+        n_rows = _check_rows_and_cardinality(args.data, header, [r.column for r in tokenized], args.min_distinct)
+    except (CliError, LowCardinalityError) as exc:
+        if audit is not None:
+            record_view(audit, args.actor, args.role, plan, "error", str(exc), 0)
+        raise
+    if audit is not None:  # recorded before any output is written
+        record_view(audit, args.actor, args.role, plan, "allowed", summarize(plan), n_rows)
+
+    visible = [(header.index(r.column), r) for r in plan if r.treatment is not Treatment.DENY]
+    with _output(args.output) as out:
+        writer = csv.writer(out)
+        writer.writerow(r.column for _, r in visible)
+        for _, row in _iter_rows(args.data, header):
+            out_row = []
+            for i, r in visible:
+                value = row[i]
+                if r.treatment is Treatment.TOKENIZE and value is not None:
+                    value = tokenizer.tokenize(value, column=r.domain or r.column)  # type: ignore[union-attr]
+                out_row.append("" if value is None else value)
+            writer.writerow(out_row)
+    denied = [r.column for r in plan if r.treatment is Treatment.DENY]
     if denied:
         print(f"colgov: left out {len(denied)} column(s): {', '.join(denied)}", file=sys.stderr)
     return 0
@@ -222,22 +243,28 @@ def cmd_detokenize(args: argparse.Namespace) -> int:
 
 
 def cmd_retokenize(args: argparse.Namespace) -> int:
-    header, data = _read_csv(args.data)
+    header = _read_header(args.data)
     columns = [c.strip() for c in args.columns.split(",") if c.strip()]
-    missing = [c for c in columns if c not in data]
+    missing = [c for c in columns if c not in header]
     if not columns or missing:
         detail = f"; not found: {', '.join(missing)}" if missing else ""
         raise CliError(f"--columns must name columns of {args.data}{detail}")
     catalog = Catalog.load(args.catalog) if args.catalog else None
     tokenizer = _tokenizer(args)
-    changed = 0
+    targets = []
     for column in columns:
         decision = catalog.get(column, table=args.table) if catalog else None
-        domain = decision.token_domain if decision else column
-        new = [tokenizer.retokenize(t, column=domain) for t in data[column]]
-        changed += sum(1 for old, t in zip(data[column], new, strict=True) if old != t)
-        data[column] = new
-    _write_csv(args.output, {c: data[c] for c in header})
+        targets.append((header.index(column), decision.token_domain if decision else column))
+    changed = 0
+    with _output(args.output) as out:
+        writer = csv.writer(out)
+        writer.writerow(header)
+        for _, row in _iter_rows(args.data, header):
+            for i, domain in targets:
+                new = tokenizer.retokenize(row[i], column=domain)
+                changed += new != row[i]
+                row[i] = new
+            writer.writerow("" if v is None else v for v in row)
     print(f"colgov: re-issued {changed} token(s) under key {tokenizer.keyring.primary_id}", file=sys.stderr)
     return 0
 
@@ -255,38 +282,91 @@ def _pack(spec: str) -> RulePack:
     return RulePack.load(spec) if os.path.exists(spec) else RulePack.builtin(spec)
 
 
-def _read_csv(path: str, *, header_only: bool = False) -> tuple[list[str], dict[str, list[str | None]]]:
+def _read_header(path: str) -> list[str]:
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        header = next(csv.reader(f), None)
+    if not header:
+        raise CliError(f"{path}: no header row")
+    if len(set(header)) != len(header) or not all(header):
+        raise CliError(f"{path}: column names must be unique and non-empty")
+    return header
+
+
+def _iter_rows(path: str, header: list[str]) -> Iterator[tuple[int, list[str | None]]]:
+    """Yield (line number, values) for each data row; empty cells are None."""
     with open(path, newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
-        header = next(reader, None)
-        if not header:
-            raise CliError(f"{path}: no header row")
-        if len(set(header)) != len(header) or not all(header):
-            raise CliError(f"{path}: column names must be unique and non-empty")
-        data: dict[str, list[str | None]] = {c: [] for c in header}
-        if header_only:
-            return header, data
+        next(reader, None)
         for lineno, row in enumerate(reader, start=2):
             if len(row) != len(header):
                 raise CliError(f"{path}, line {lineno}: expected {len(header)} fields, got {len(row)}")
-            for column, value in zip(header, row, strict=True):
-                data[column].append(value if value != "" else None)
+            yield lineno, [v if v != "" else None for v in row]
+
+
+def _read_csv(path: str, *, limit: int | None = None) -> tuple[list[str], dict[str, list[str | None]]]:
+    """Read a CSV file (or its first ``limit`` rows) into columns."""
+    header = _read_header(path)
+    data: dict[str, list[str | None]] = {c: [] for c in header}
+    for n, (_, row) in enumerate(_iter_rows(path, header)):
+        if limit is not None and n >= limit:
+            break
+        for column, value in zip(header, row, strict=True):
+            data[column].append(value)
     return header, data
 
 
-def _write_csv(path: str, view: dict[str, list[Any]]) -> None:
+def _check_rows_and_cardinality(path: str, header: list[str], columns: list[str], min_distinct: int) -> int:
+    """First pass of apply: validate every row, count rows, refuse low-cardinality columns.
+
+    Distinct values are tracked only until a column reaches ``min_distinct``,
+    so memory stays bounded. A column that never does has been tracked in
+    full, so its reported profile is exact.
+    """
+    positions = [(c, header.index(c)) for c in columns]
+    counts: dict[str, Counter[str]] = {c: Counter() for c in columns}
+    nulls = dict.fromkeys(columns, 0)
+    open_columns = set(columns)
+    n_rows = 0
+    for _, row in _iter_rows(path, header):
+        n_rows += 1
+        for column, i in positions:
+            value = row[i]
+            if value is None:
+                nulls[column] += 1
+            elif column in open_columns:
+                counts[column][value] += 1
+                if len(counts[column]) >= min_distinct:
+                    open_columns.discard(column)
+    for column in columns:
+        if column in open_columns and counts[column]:
+            freq = counts[column]
+            risk = ColumnRisk(
+                n_rows=n_rows,
+                n_null=nulls[column],
+                n_distinct=len(freq),
+                min_frequency=min(freq.values()),
+                top_share=max(freq.values()) / (n_rows - nulls[column]),
+            )
+            raise LowCardinalityError(column, risk, min_distinct)
+    return n_rows
+
+
+@contextlib.contextmanager
+def _output(path: str) -> Iterator[TextIO]:
+    """Write to stdout, or to ``path`` atomically: a temp file renamed on success."""
     if path == "-":
-        _write_rows(sys.stdout, view)
-    else:
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            _write_rows(f, view)
-
-
-def _write_rows(out: TextIO, view: dict[str, list[Any]]) -> None:
-    writer = csv.writer(out)
-    writer.writerow(view.keys())
-    for row in zip(*view.values(), strict=True):
-        writer.writerow("" if v is None else v for v in row)
+        yield sys.stdout
+        return
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".colgov-", suffix=".csv.tmp")
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
+            yield f
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
 
 
 def _tokenizer(args: argparse.Namespace) -> Tokenizer:

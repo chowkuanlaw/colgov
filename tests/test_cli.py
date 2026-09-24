@@ -398,3 +398,78 @@ def test_review_with_table(workdir):
     cat = Catalog.load("t.yaml")
     assert cat.get("customer_email", table="customers").label == "email"
     assert cat.get("customer_email") is None
+
+
+# --- streaming (0.4) -------------------------------------------------------------------
+
+
+def test_apply_bad_row_writes_nothing(workdir, capsys):
+    with open("data.csv", "a", newline="") as f:
+        f.write("only,three,fields\n")
+    code, _, err = run(
+        capsys,
+        "apply",
+        "data.csv",
+        *POLICY_ARGS,
+        "--role",
+        "analyst",
+        "-o",
+        "out.csv",
+        "--audit",
+        "audit.jsonl",
+        "--actor",
+        "bob",
+    )
+    assert code == 1 and "line 22: expected 4 fields" in err
+    assert not (workdir / "out.csv").exists()
+    assert not list(workdir.glob(".colgov-*"))  # no temp file left behind
+    assert json.loads(open("audit.jsonl").readline())["outcome"] == "error"
+
+
+def test_apply_replaces_output_atomically(workdir, capsys):
+    (workdir / "out.csv").write_text("old contents\n")
+    code, _, _ = run(capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "analyst", "-o", "out.csv")
+    assert code == 0
+    assert open("out.csv").readline().strip() == "customer_email,gender"
+    assert not list(workdir.glob(".colgov-*"))
+
+
+def test_apply_audit_counts_rows_before_output(workdir, capsys):
+    code, _, _ = run(
+        capsys,
+        "apply",
+        "data.csv",
+        *POLICY_ARGS,
+        "--role",
+        "analyst",
+        "-o",
+        "out.csv",
+        "--audit",
+        "audit.jsonl",
+        "--actor",
+        "bob",
+    )
+    event = json.loads(open("audit.jsonl").readline())
+    assert (code, event["outcome"], event["count"]) == (0, "allowed", 20)
+
+
+def test_classify_reads_only_the_sample(workdir, capsys):
+    with open("data.csv", "a", newline="") as f:
+        f.write("broken,row\n")
+    code, out, _ = run(capsys, "classify", "data.csv", "--sample-size", "5")
+    assert code == 0 and "customer_email: email" in out
+    code, _, err = run(capsys, "classify", "data.csv")
+    assert code == 1 and "expected 4 fields" in err
+
+
+def test_cardinality_scan_is_exact_for_refused_columns(tmp_path):
+    from colgov import LowCardinalityError
+    from colgov.cli import _check_rows_and_cardinality
+
+    path = tmp_path / "d.csv"
+    path.write_text("a,b\n" + "".join(f"x{i % 2},{i}\n" for i in range(9)) + ",99\n")
+    with pytest.raises(LowCardinalityError) as exc_info:
+        _check_rows_and_cardinality(str(path), ["a", "b"], ["a"], 3)
+    risk = exc_info.value.risk
+    assert (risk.n_rows, risk.n_null, risk.n_distinct, risk.min_frequency) == (10, 1, 2, 4)
+    assert _check_rows_and_cardinality(str(path), ["a", "b"], ["b"], 3) == 10

@@ -9,7 +9,9 @@ from colgov.audit import (
     AuditLog,
     AuditLogError,
     JsonlAuditLog,
+    LoggingAuditLog,
     MemoryAuditLog,
+    MultiAuditLog,
     verify_audit_log,
 )
 from colgov.keys import KeySpecError, load_key, load_keyring
@@ -46,8 +48,10 @@ __all__ = [
     "KeySpecError",
     "Keyring",
     "Label",
+    "LoggingAuditLog",
     "LowCardinalityError",
     "MemoryAuditLog",
+    "MultiAuditLog",
     "Policy",
     "PolicyError",
     "Resolution",

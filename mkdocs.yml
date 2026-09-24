@@ -21,6 +21,7 @@ nav:
   - Overview: index.md
   - Threat model: threat-model.md
   - API stability: stability.md
+  - Performance: performance.md
   - API reference: api.md
   - Changelog: changelog.md
 

@@ -281,3 +281,56 @@ def test_tokenizer_pickles_without_cipher_cache():
     assert clone.tokenize("x", column="c") == token
     assert "master keys hidden" in repr(tok)
     assert KEY.hex() not in repr(tok)
+
+
+# --- concurrency and other sinks (0.4) ---------------------------------------------
+
+
+def _write_events(path, worker, n):
+    log = JsonlAuditLog(path)
+    for i in range(n):
+        log.record(_event(actor=f"w{worker}", count=i))
+
+
+def test_jsonl_log_is_safe_across_processes(tmp_path):
+    import multiprocessing as mp
+
+    path = tmp_path / "audit.jsonl"
+    ctx = mp.get_context("spawn")
+    procs = [ctx.Process(target=_write_events, args=(str(path), w, 100)) for w in range(8)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+        assert p.exitcode == 0
+    assert verify_audit_log(path) == 800
+
+
+def test_logging_audit_log(caplog):
+    import json as _json
+    import logging
+
+    from colgov import LoggingAuditLog
+
+    with caplog.at_level(logging.INFO, logger="colgov.audit"):
+        LoggingAuditLog().record(_event())
+    [record] = caplog.records
+    assert record.name == "colgov.audit"
+    assert _json.loads(record.getMessage())["actor"] == "alice"
+
+
+def test_multi_audit_log_writes_all_and_propagates_failures(tmp_path):
+    from colgov import MultiAuditLog
+
+    a, b = MemoryAuditLog(), MemoryAuditLog()
+    MultiAuditLog(a, b).record(_event())
+    assert len(a.events) == len(b.events) == 1
+
+    class Broken:
+        def record(self, event):
+            raise OSError("down")
+
+    with pytest.raises(OSError):
+        MultiAuditLog(a, Broken()).record(_event())
+    with pytest.raises(ValueError):
+        MultiAuditLog()

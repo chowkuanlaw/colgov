@@ -5,6 +5,9 @@ the executors, so the :class:`colgov.Tokenizer` (and its master key) is
 shipped to them with the job. Run it only on a cluster you trust with the
 key, and prefer a key from your secret manager over one in a notebook.
 colgov must be installed on the executors as well as the driver.
+
+With ``pyarrow`` installed, tokenization uses a vectorized (Arrow) UDF,
+which avoids per-row Python overhead; without it, a row UDF is used.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ try:
 except ImportError as exc:  # pragma: no cover - exercised only without pyspark
     raise ImportError('colgov.spark needs PySpark: pip install "colgov[spark]"') from exc
 
-from typing import Any
+from typing import Any, cast
 
 from colgov.audit import AuditLog
 from colgov.policy import (
@@ -147,7 +150,30 @@ def _small_column_risk(sdf: DataFrame, column: str) -> ColumnRisk:
     )
 
 
+def _arrow_available() -> bool:
+    try:
+        import pandas  # noqa: F401
+        import pyarrow  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _tokenize_udf(tokenizer: Tokenizer, column: str) -> Any:
+    """A vectorized (Arrow) UDF when pandas and pyarrow are installed, else a row UDF."""
+    if _arrow_available():
+        import pandas as pd
+        from pyspark.sql.pandas.functions import pandas_udf
+
+        def tokenize_batch(values: pd.Series) -> pd.Series:
+            batch = [None if v is None or v != v else v for v in values]  # v != v: NaN
+            return pd.Series(tokenizer.tokenize_many(batch, column=column), index=values.index, dtype=object)
+
+        # Spark reads the type hints to pick the UDF kind; with postponed
+        # evaluation they are strings it can't resolve, so set them directly.
+        tokenize_batch.__annotations__ = {"values": pd.Series, "return": pd.Series}
+        return cast(Any, pandas_udf)(tokenize_batch, StringType())
+
     # No type hints: Spark would try to infer an Arrow (pandas) UDF from them.
     def tokenize(value):  # type: ignore[no-untyped-def]
         return tokenizer.tokenize(value, column=column)

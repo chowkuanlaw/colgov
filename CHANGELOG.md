@@ -16,6 +16,26 @@
   - `mypy --strict` over the package
   - the docs site built with `--strict`
 - **New extras:** `dev` and `docs`.
+- **Audit log with several writers.** `JsonlAuditLog` can take appends from
+  several processes: each write takes an exclusive `flock` and re-reads the
+  last hash, so the chain never forks.
+- **More audit destinations.** `LoggingAuditLog` sends events to Python
+  `logging`, and from there to syslog or a SIEM. `MultiAuditLog` writes to
+  several logs and fails if any one fails.
+- **`Tokenizer.tokenize_many`:** batch tokenization, about 20% faster than
+  a loop.
+- **Faster Spark.** `colgov.spark` uses a vectorized Arrow UDF when
+  `pyarrow` is installed, about 5× faster than the row UDF.
+- **Streaming CLI:**
+  - `colgov apply` makes one pass to check the file and one to write, with
+    bounded memory. The audit record is written before any output, and
+    output files are replaced atomically.
+  - `retokenize` also streams.
+  - `classify` and `review` read only the sample rows they need.
+- **Testing and benchmarks:**
+  - property-based and fuzz tests with Hypothesis
+  - a coverage gate at 95% in CI
+  - `benchmarks/bench.py` and a performance page in the docs
 
 ### Changed
 

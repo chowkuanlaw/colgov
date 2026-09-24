@@ -129,3 +129,10 @@ def test_non_string_values_rejected(tok, value):
 def test_invalid_column_rejected(tok, column):
     with pytest.raises(ValueError):
         tok.tokenize("x", column=column)  # type: ignore[arg-type]
+
+
+def test_tokenize_many_matches_tokenize(tok):
+    values = ["a", None, "", "李", "a"]
+    assert tok.tokenize_many(values, column="c") == [tok.tokenize(v, column="c") for v in values]
+    with pytest.raises(TypeError):
+        tok.tokenize_many(["a", 1], column="c")

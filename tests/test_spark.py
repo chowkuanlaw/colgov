@@ -131,3 +131,17 @@ def test_apply_uses_table_and_domain(spark, tok):
     out = cspark.apply(sdf, policy, role="a", catalog=cat, table="orders", tokenizer=tok)
     assert out.first()[0] == tok.tokenize("u0@x.com", column="email")
     assert cspark.apply(sdf, policy, role="a", catalog=cat, tokenizer=tok).columns == []
+
+
+@pytest.mark.parametrize("arrow", [True, False])
+def test_apply_row_and_arrow_udfs_agree(spark, catalog, policy, tok, monkeypatch, arrow):
+    if arrow:
+        pytest.importorskip("pyarrow")
+        pytest.importorskip("pandas")
+    monkeypatch.setattr(cspark, "_arrow_available", lambda: arrow)
+    rows = [(f"user{i}@example.com", float(i), "n/a") for i in range(30)] + [(None, 0.0, "n/a")]
+    sdf = spark.createDataFrame(rows, "customer_email string, amount double, notes string").repartition(3)
+    out = cspark.apply(sdf, policy, role="analyst", catalog=catalog, tokenizer=tok)
+    got = sorted((r.customer_email or "") for r in out.collect())
+    expected = sorted((tok.tokenize(v, column="customer_email") or "") for v, _, _ in rows)
+    assert got == expected

@@ -65,8 +65,10 @@ These follow from the design. They are not bugs.
   catches edits, deletions and reordering inside the log, but not removal
   of its last lines. Ship the log off the machine promptly, e.g. to a SIEM
   or to storage with object lock, and compare event counts.
-- **One writer per `JsonlAuditLog` file.** Concurrent writers would fork
-  the chain.
+- **Shared audit logs need file locking.** Several processes may append to
+  one `JsonlAuditLog` on Linux and macOS, where each write takes an
+  exclusive `flock`. Network filesystems may not honour `flock`, and
+  Windows has none, so there use one writer per file.
 - **Rotation doesn't revoke old tokens.** Tokens made with an older key stay
   readable until that key is removed from the keyring. Retokenize stored
   data, then remove the key.

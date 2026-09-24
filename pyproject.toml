@@ -50,6 +50,8 @@ spark = [
 ]
 test = [
     "pytest>=7",
+    "pytest-cov>=4",
+    "hypothesis>=6",
 ]
 dev = [
     "ruff>=0.6",
@@ -105,5 +107,5 @@ files = ["src/colgov"]
 warn_unreachable = true
 
 [[tool.mypy.overrides]]
-module = ["pyspark.*", "moto.*"]
+module = ["pyspark.*", "moto.*", "pyarrow.*"]
 ignore_missing_imports = true

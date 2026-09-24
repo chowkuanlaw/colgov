@@ -190,6 +190,27 @@ class Tokenizer:
         body = cipher.encrypt(_V2_PAD + value.encode("utf-8"), [header])
         return base64.urlsafe_b64encode(header + body).rstrip(b"=").decode("ascii")
 
+    def tokenize_many(self, values: Iterable[str | None], *, column: str) -> list[str | None]:
+        """Tokenize many values in one domain; faster than calling :meth:`tokenize` in a loop.
+
+        Same result as ``[tokenize(v, column=column) for v in values]``, with
+        no cardinality check (see :meth:`tokenize_column`).
+        """
+        ring = self._keyring
+        header = _V2 + ring._primary_raw_id
+        encrypt = self._v2_cipher(ring._primary_raw_id, column).encrypt
+        ad = [header]
+        b64 = base64.urlsafe_b64encode
+        out: list[str | None] = []
+        for value in values:
+            if value is None:
+                out.append(None)
+            elif isinstance(value, str):
+                out.append(b64(header + encrypt(_V2_PAD + value.encode("utf-8"), ad)).rstrip(b"=").decode("ascii"))
+            else:
+                raise TypeError(f"value must be str or None, got {type(value).__name__}")
+        return out
+
     def tokenize_column(
         self,
         values: Iterable[str | None],
@@ -209,7 +230,7 @@ class Tokenizer:
             risk = column_risk(values)
             if risk.is_low_cardinality(min_distinct):
                 raise LowCardinalityError(column, risk, min_distinct)
-        return [self.tokenize(v, column=column) for v in values]
+        return self.tokenize_many(values, column=column)
 
     # --- detokenizing -------------------------------------------------------
 
