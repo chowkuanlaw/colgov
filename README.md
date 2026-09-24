@@ -6,8 +6,10 @@ Tokenize a column and it stays joinable. Same plaintext, same token — every
 time, across tables and across runs — so `JOIN`, `GROUP BY` and
 `COUNT(DISTINCT)` keep working on data nobody can read.
 
-> **Status: alpha (`0.3.0`).** Every v0.1–v0.3 feature is in place. The API may
-> still change before 1.0. See [CHANGELOG.md](https://github.com/chowkuanlaw/colgov/blob/main/CHANGELOG.md).
+> **Status: release candidate (`1.0.0rc1`).** The public API and file formats
+> are frozen for 1.0: see the [stability policy](https://github.com/chowkuanlaw/colgov/blob/main/docs/stability.md).
+> Install it with `pip install --pre colgov`. Please report anything that
+> should change before 1.0.0. See [CHANGELOG.md](https://github.com/chowkuanlaw/colgov/blob/main/CHANGELOG.md).
 
 ## The problem
 
@@ -345,8 +347,9 @@ column's values. In the CSV files, empty cells are treated as nulls.
 - [x] Audit log shared by several processes; `logging` and multi-log sinks
 - [x] Streaming CLI, Arrow-based Spark UDF, benchmarks
 - [x] Property-based and fuzz tests, coverage gate
+- [x] 1.0.0 release candidate (`1.0.0rc1`)
 - [ ] Independent review of the cryptographic design
-- [ ] 1.0.0 release candidate, then feedback from real use
+- [ ] Feedback from real use, then 1.0.0
 
 ## Scope
 
@@ -361,7 +364,7 @@ detector feeding `colgov`'s classification.
 Read the [threat model](https://github.com/chowkuanlaw/colgov/blob/main/docs/threat-model.md) before using colgov with real
 personal data. Report vulnerabilities privately as described in
 [SECURITY.md](https://github.com/chowkuanlaw/colgov/blob/main/SECURITY.md). The [API stability policy](https://github.com/chowkuanlaw/colgov/blob/main/docs/stability.md)
-explains what will stay compatible from 1.0.
+explains what stays compatible from 1.0.
 
 ## License
 

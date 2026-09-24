@@ -27,7 +27,7 @@ named.
 | Latest minor release | Yes |
 | Anything older | No: please upgrade |
 
-Before 1.0, fixes go into the next release only.
+Before 1.0.0, including release candidates, fixes go into the next release only.
 
 ## Scope
 

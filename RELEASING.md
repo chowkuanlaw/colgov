@@ -32,3 +32,14 @@ in the repository.
 3. The workflow checks that the tag matches the package version, runs the
    tests, builds the package and publishes it. If the tag and the version
    don't match, nothing is published.
+
+## Release candidates
+
+Use a PEP 440 pre-release version such as `1.0.0rc1`, with the tag
+`v1.0.0rc1`. PyPI marks it as a pre-release, so `pip install colgov` keeps
+installing the latest final release. Testers opt in with
+`pip install --pre colgov` or `pip install colgov==1.0.0rc1`.
+
+Between a release candidate and the final release, merge only bug fixes and
+security fixes. To release the final version, set the version to `1.0.0`,
+move the changelog entry to `1.0.0` and follow **Each release** above.

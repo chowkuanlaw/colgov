@@ -85,8 +85,8 @@ class LowCardinalityError(ValueError):
         super().__init__(
             f"column {column!r} has {risk.n_distinct} distinct values "
             f"(minimum {min_distinct}); its tokens could be reversed from "
-            f"value frequencies alone. Pass allow_low_cardinality=True to "
-            f"tokenize it anyway, or suppress or generalize the column instead."
+            f"value frequencies alone. Suppress or generalize the column "
+            f"instead, or lower the minimum if you accept that risk."
         )
 
 

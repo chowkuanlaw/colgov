@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+import colgov
 from colgov import Catalog, Tokenizer, verify_audit_log
 from colgov.cli import KEY_ENV, cmd_review, main
 
@@ -53,7 +54,7 @@ def test_version(capsys):
     with pytest.raises(SystemExit) as exc_info:
         main(["--version"])
     assert exc_info.value.code == 0
-    assert "colgov 0.3.0" in capsys.readouterr().out
+    assert f"colgov {colgov.__version__}" in capsys.readouterr().out
 
 
 def test_no_command_is_usage_error(capsys):
@@ -165,7 +166,10 @@ def test_apply_low_cardinality_is_clean_error(workdir, capsys):
     code, out, err = run(capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "analyst")
     assert code == 1
     assert "colgov: error: column 'gender' has 2 distinct values" in err
+    assert "pass --min-distinct 2" in err and "allow_low_cardinality" not in err
     assert out == ""
+    code, _, _ = run(capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "analyst", "--min-distinct", "2")
+    assert code == 0
 
 
 def test_apply_audit_needs_actor(workdir, capsys):
