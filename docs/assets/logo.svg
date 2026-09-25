@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">colgov</title>
+  <!-- A table: the outer columns stay readable, the governed column is locked. -->
+  <rect width="256" height="256" rx="56" fill="#0B2536"/>
+  <g fill="#7FA3B8">
+    <rect x="44" y="52" width="48" height="32" rx="7"/>
+    <rect x="164" y="52" width="48" height="32" rx="7"/>
+  </g>
+  <g fill="#DCE7EE">
+    <rect x="44" y="92" width="48" height="32" rx="7"/>
+    <rect x="44" y="132" width="48" height="32" rx="7"/>
+    <rect x="44" y="172" width="48" height="32" rx="7"/>
+    <rect x="164" y="92" width="48" height="32" rx="7"/>
+    <rect x="164" y="132" width="48" height="32" rx="7"/>
+    <rect x="164" y="172" width="48" height="32" rx="7"/>
+  </g>
+  <rect x="104" y="52" width="48" height="152" rx="9" fill="#2DD4BF"/>
+  <g fill="#0B2536">
+    <circle cx="128" cy="114" r="12"/>
+    <path d="M122.5 120 L117 150 H139 L133.5 120 Z"/>
+  </g>
+</svg>

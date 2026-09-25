@@ -6,6 +6,8 @@ edit_uri: ""
 
 theme:
   name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
   features:
     - content.code.copy
     - navigation.sections

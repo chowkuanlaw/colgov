@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/chowkuanlaw/colgov/main/docs/assets/logo-256.png" width="128" height="128" alt="colgov logo: a table whose middle column is locked">
+</p>
+
 # colgov
 
 **Deterministic, reversible tokenization and fail-closed access policy for tabular PII.**
