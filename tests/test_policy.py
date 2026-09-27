@@ -341,3 +341,17 @@ def test_detokenize_uses_domain_and_table(tokenizer):
             purpose="p",
             audit=audit,
         )
+
+
+def test_granted_labels():
+    policy = Policy.from_dict(
+        {
+            "roles": {
+                "analyst": {"email": "tokenize", "phone_number": "deny"},
+                "support": {"email": {"view": "clear", "detokenize": True}, "postal_code": "clear"},
+            }
+        }
+    )
+    assert policy.granted_labels == {"email", "postal_code", PUBLIC}
+    no_public = Policy.from_dict({"roles": {"a": {PUBLIC: "deny"}, "b": {PUBLIC: "deny", "email": "clear"}}})
+    assert no_public.granted_labels == {"email"}

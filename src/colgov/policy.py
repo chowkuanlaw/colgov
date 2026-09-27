@@ -106,6 +106,21 @@ class Policy:
     def roles(self) -> list[str]:
         return list(self._roles)
 
+    @property
+    def granted_labels(self) -> set[str]:
+        """Labels at least one role may see, in clear or tokenized.
+
+        ``public`` counts as granted unless every role denies it, since
+        roles see public columns in clear by default.
+        """
+        granted = {
+            label for grants in self._roles.values() for label, g in grants.items() if g.view is not Treatment.DENY
+        }
+        public_default = Grant(view=Treatment.CLEAR)
+        if any(grants.get(PUBLIC, public_default).view is not Treatment.DENY for grants in self._roles.values()):
+            granted.add(PUBLIC)
+        return granted
+
     # --- loading ------------------------------------------------------------
 
     @classmethod

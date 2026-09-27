@@ -477,3 +477,345 @@ def test_cardinality_scan_is_exact_for_refused_columns(tmp_path):
     risk = exc_info.value.risk
     assert (risk.n_rows, risk.n_null, risk.n_distinct, risk.min_frequency) == (10, 1, 2, 4)
     assert _check_rows_and_cardinality(str(path), ["a", "b"], ["b"], 3) == 10
+
+
+# --- rule packs on the command line ------------------------------------------------
+
+
+def test_classify_with_combined_packs(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    with open("my.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["id_no", "customer_email"])
+        for i in range(5):
+            w.writerow([f"90010{i + 1}-14-567{i}", f"user{i}@example.com"])
+    code, out, _ = run(capsys, "classify", "my.csv", "--pack", "core,sea")
+    assert code == 0
+    assert "id_no: national_id (0.90) [sea-mykad-value]" in out
+    assert "customer_email: email" in out
+    code, out, _ = run(capsys, "classify", "my.csv")
+    assert "id_no: national_id" not in out  # core alone doesn't check MyKad values
+    code, _, err = run(capsys, "classify", "my.csv", "--pack", " , ")
+    assert code == 1 and "--pack must name at least one rule pack" in err
+    code, _, err = run(capsys, "classify", "my.csv", "--pack", "core,nope")
+    assert code == 1 and "built-in packs: core, sea" in err
+
+
+# --- check ------------------------------------------------------------------------
+
+
+def test_check_passes_when_every_column_is_reviewed(workdir, capsys):
+    cat = Catalog.load("catalog.yaml")
+    cat.decide("comments", "public", by="alice")
+    cat.save("catalog.yaml")
+    code, out, _ = run(capsys, "check", "data.csv", "-c", "catalog.yaml")
+    assert code == 0
+    assert out.strip() == "colgov check: 0 error(s), 0 warning(s) in 1 table(s), 4 column(s)"
+
+
+def test_check_fails_on_unreviewed_columns(workdir, capsys):
+    code, out, _ = run(capsys, "check", "data.csv", "-c", "catalog.yaml")
+    assert code == 1
+    assert "error: comments: not reviewed" in out
+    assert "1 error(s)" in out
+
+
+def test_check_uses_table(workdir, capsys):
+    code, out, _ = run(capsys, "check", "data.csv", "-c", "catalog.yaml", "--table", "crm")
+    assert code == 1
+    assert out.count("not reviewed") == 4  # no fallback to table-less decisions
+    assert "error: crm.customer_email: not reviewed" in out
+
+
+def test_check_warns_about_stale_decisions_and_ungranted_labels(workdir, capsys):
+    cat = Catalog.load("catalog.yaml")
+    cat.decide("comments", "public", by="alice")
+    cat.decide("old_column", "email", by="alice")
+    cat.save("catalog.yaml")
+    code, out, _ = run(capsys, "check", "data.csv", *POLICY_ARGS)
+    assert code == 0  # warnings only
+    assert "warning: old_column: has a decision but is not in the schema" in out
+    # phone_number is denied to every role in POLICY
+    assert "warning: mobile_no: label 'phone_number' is not granted to any role" in out
+    assert "0 error(s), 2 warning(s)" in out
+    code, _, _ = run(capsys, "check", "data.csv", *POLICY_ARGS, "--strict")
+    assert code == 1
+
+
+def test_check_github_format(workdir, capsys):
+    code, out, _ = run(capsys, "check", "data.csv", "-c", "catalog.yaml", "--format", "github")
+    assert code == 1
+    assert "::error title=Unreviewed column::comments: not reviewed" in out
+
+
+def test_check_merges_several_files_of_one_table(workdir, capsys):
+    with open("more.csv", "w", newline="") as f:
+        csv.writer(f).writerow(["customer_email", "signup_ip"])
+    code, out, _ = run(capsys, "check", "data.csv", "more.csv", "-c", "catalog.yaml")
+    assert code == 1
+    assert "error: signup_ip: not reviewed" in out
+    assert "1 table(s), 5 column(s)" in out
+
+
+def _dbt(path, kind, nodes, sources=None):
+    data = {
+        "metadata": {"dbt_schema_version": f"https://schemas.getdbt.com/dbt/{kind}/v12.json"},
+        "nodes": nodes,
+        "sources": sources or {},
+    }
+    path.write_text(json.dumps(data))
+
+
+def test_check_dbt_manifest(tmp_path, capsys):
+    _dbt(
+        tmp_path / "manifest.json",
+        "manifest",
+        {
+            "model.shop.customers": {"name": "customers", "columns": {"email": {"name": "email"}, "id": {}}},
+            "model.shop.orders": {"name": "orders", "columns": {}},  # undocumented: nothing to check
+            "test.shop.not_null": {"name": "not_null", "columns": {"x": {"name": "x"}}},
+        },
+        {"source.shop.raw.users": {"name": "users", "columns": {"phone": {"name": "phone"}}}},
+    )
+    cat = Catalog()
+    cat.decide("email", "email", by="alice", table="customers")
+    cat.save(tmp_path / "catalog.yaml")
+    code, out, _ = run(capsys, "check", str(tmp_path / "manifest.json"), "-c", str(tmp_path / "catalog.yaml"))
+    assert code == 1
+    assert "error: customers.id: not reviewed" in out
+    assert "error: raw.users.phone: not reviewed" in out
+    assert "not_null" not in out
+    assert "2 error(s), 0 warning(s) in 2 table(s), 3 column(s)" in out
+
+
+def test_check_dbt_catalog(tmp_path, capsys):
+    _dbt(
+        tmp_path / "catalog.json",
+        "catalog",
+        {"model.shop.customers": {"metadata": {"name": "CUSTOMERS"}, "columns": {"EMAIL": {"name": "EMAIL"}}}},
+        {"source.shop.raw.users": {"metadata": {"name": "users"}, "columns": {"PHONE": {"name": "PHONE"}}}},
+    )
+    Catalog().save(tmp_path / "colgov.yaml")
+    code, out, _ = run(capsys, "check", str(tmp_path / "catalog.json"), "-c", str(tmp_path / "colgov.yaml"))
+    assert code == 1
+    assert "error: customers.EMAIL: not reviewed" in out
+    assert "error: raw.users.PHONE: not reviewed" in out
+
+
+@pytest.mark.parametrize(
+    "content, message",
+    [
+        ("{not json", "not valid JSON"),
+        ('{"nodes": {}}', "not a dbt manifest.json or catalog.json"),
+        ("[]", "not a dbt manifest.json or catalog.json"),
+    ],
+)
+def test_check_rejects_other_json(tmp_path, capsys, content, message):
+    (tmp_path / "x.json").write_text(content)
+    Catalog().save(tmp_path / "c.yaml")
+    code, _, err = run(capsys, "check", str(tmp_path / "x.json"), "-c", str(tmp_path / "c.yaml"))
+    assert code == 1 and message in err
+
+
+def test_check_dbt_with_table_is_an_error(tmp_path, capsys):
+    _dbt(tmp_path / "manifest.json", "manifest", {})
+    Catalog().save(tmp_path / "c.yaml")
+    code, _, err = run(capsys, "check", str(tmp_path / "manifest.json"), "-c", str(tmp_path / "c.yaml"), "--table", "t")
+    assert code == 1 and "--table can't be used with a dbt file" in err
+
+
+# --- Parquet ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def parquet_workdir(workdir):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    table = pa.table(
+        {
+            "customer_email": pa.array([f"user{i}@example.com" for i in range(19)] + [None], pa.string()),
+            "mobile_no": [f"+60 12-{1000000 + i}" for i in range(20)],
+            "gender": pa.array(["MF"[i % 2] for i in range(20)]).dictionary_encode(),
+            "age": pa.array(range(20, 40), pa.int32()),
+        }
+    )
+    pq.write_table(table, "data.parquet")
+    cat = Catalog.load("catalog.yaml")
+    cat.decide("age", "public", by="alice")
+    cat.save("catalog.yaml")
+    return workdir
+
+
+def test_apply_parquet_to_parquet_keeps_types(parquet_workdir, capsys):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    code, _, err = run(capsys, "apply", "data.parquet", *POLICY_ARGS, "--role", "analyst", "-o", "out.parquet")
+    assert code == 0, err
+    assert "left out 1 column(s): mobile_no" in err
+    out = pq.read_table("out.parquet")
+    assert out.column_names == ["customer_email", "gender", "age"]
+    assert out.schema.field("age").type == pa.int32()
+    assert out.schema.field("gender").type == pa.string()
+    t = Tokenizer(KEY)
+    emails = out.column("customer_email").to_pylist()
+    assert emails[0] == t.tokenize("user0@example.com", column="customer_email")
+    assert emails[-1] is None
+    assert out.column("age").to_pylist() == list(range(20, 40))
+
+
+def test_apply_parquet_to_csv_and_back(parquet_workdir, capsys):
+    import pyarrow.parquet as pq
+
+    code, _, _ = run(capsys, "apply", "data.parquet", *POLICY_ARGS, "--role", "analyst", "-o", "out.csv")
+    assert code == 0
+    rows = list(csv.reader(open("out.csv")))
+    assert rows[0] == ["customer_email", "gender", "age"]
+    assert rows[1][2] == "20" and rows[-1][0] == ""
+    code, _, _ = run(capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "analyst", "-o", "fromcsv.parquet")
+    assert code == 0
+    assert pq.read_table("fromcsv.parquet").column_names == ["customer_email", "gender"]
+
+
+def test_apply_parquet_in_batches(parquet_workdir, capsys, monkeypatch):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from colgov import _tabular
+
+    monkeypatch.setattr(_tabular, "BATCH_ROWS", 3)
+    pq.write_table(pa.table({"customer_email": [f"u{i}@x.com" for i in range(20)]}), "data.parquet", row_group_size=4)
+    code, _, _ = run(capsys, "apply", "data.parquet", *POLICY_ARGS, "--role", "analyst", "-o", "out.parquet")
+    assert code == 0
+    out = pq.read_table("out.parquet").column("customer_email").to_pylist()
+    t = Tokenizer(KEY)
+    assert out == [t.tokenize(f"u{i}@x.com", column="customer_email") for i in range(20)]
+
+
+def test_apply_parquet_empty_view(parquet_workdir, capsys):
+    import pyarrow.parquet as pq
+
+    code, _, _ = run(capsys, "apply", "data.parquet", *POLICY_ARGS, "--role", "nobody", "-o", "out.parquet")
+    assert code == 0
+    assert pq.read_table("out.parquet").num_columns == 0
+
+
+def test_apply_parquet_refuses_non_string_tokenized_columns(parquet_workdir, capsys):
+    cat = Catalog.load("catalog.yaml")
+    cat.decide("age", "email", by="alice")
+    cat.save("catalog.yaml")
+    code, _, err = run(capsys, "apply", "data.parquet", *POLICY_ARGS, "--role", "analyst", "-o", "out.parquet")
+    assert code == 1
+    assert "column 'age' is int32, not a string; cast it to string before tokenizing" in err
+    assert not (parquet_workdir / "out.parquet").exists()
+
+
+def test_apply_parquet_low_cardinality(parquet_workdir, capsys):
+    cat = Catalog.load("catalog.yaml")
+    cat.decide("gender", "email", by="alice")  # dictionary-encoded strings, 2 values
+    cat.save("catalog.yaml")
+    code, _, err = run(
+        capsys, "apply", "data.parquet", *POLICY_ARGS, "--role", "analyst", "-o", "out.parquet",
+        "--audit", "a.jsonl", "--actor", "bob",
+    )  # fmt: skip
+    assert code == 1 and "column 'gender' has 2 distinct values" in err
+    assert not (parquet_workdir / "out.parquet").exists()
+    assert json.loads(open("a.jsonl").read())["outcome"] == "error"
+
+
+def test_parquet_classify_plan_check_and_retokenize(parquet_workdir, capsys):
+    import pyarrow.parquet as pq
+
+    code, out, _ = run(capsys, "classify", "data.parquet")
+    assert code == 0 and "customer_email: email" in out
+    code, out, _ = run(capsys, "plan", "data.parquet", *POLICY_ARGS, "--role", "analyst")
+    assert code == 0 and "age" in out
+    code, out, _ = run(capsys, "check", "data.parquet", "-c", "catalog.yaml")
+    assert code == 0, out
+
+    run(capsys, "apply", "data.parquet", *POLICY_ARGS, "--role", "analyst", "-o", "old.parquet")
+    new_key = base64.b64encode(bytes(range(1, 33))).decode()
+    (parquet_workdir / "keys.txt").write_text(f"{new_key}\n{KEY_B64}\n")
+    code, _, err = run(capsys, "retokenize", "old.parquet", "--columns", "customer_email", "--key-file", "keys.txt", "-o", "new.parquet")  # fmt: skip
+    assert code == 0 and "re-issued 19 token(s)" in err
+    new = pq.read_table("new.parquet")
+    assert new.column_names == ["customer_email", "gender", "age"]
+    t = Tokenizer(bytes(range(1, 33)))
+    assert new.column("customer_email").to_pylist()[0] == t.tokenize("user0@example.com", column="customer_email")
+    code, _, err = run(capsys, "retokenize", "old.parquet", "--columns", "age", "-o", "x.parquet")
+    assert code == 1 and "column 'age' is int32, not a string" in err
+
+
+def test_unreadable_parquet(workdir, capsys):
+    pytest.importorskip("pyarrow")
+    (workdir / "bad.parquet").write_bytes(b"not parquet")
+    code, _, err = run(capsys, "classify", "bad.parquet")
+    assert code == 1 and "bad.parquet: not a readable Parquet file" in err
+
+
+def test_parquet_needs_pyarrow(workdir, capsys, monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_pyarrow(name, *args, **kwargs):
+        if name.startswith("pyarrow"):
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_pyarrow)
+    code, _, err = run(capsys, "classify", "data.parquet")
+    assert code == 1 and 'pip install "colgov[parquet]"' in err
+
+
+@pytest.mark.parametrize("suffix", [".csv", ".parquet"])
+def test_output_is_not_left_behind_when_writing_fails(workdir, capsys, suffix):
+    if suffix == ".parquet":
+        pytest.importorskip("pyarrow")
+    t = Tokenizer(KEY)
+    good = t.tokenize("user0@example.com", column="customer_email")
+    with open("tokens.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["customer_email"])
+        w.writerow([good])
+        w.writerow([good[:-2] + "xx"])  # tampered: fails on the second row, after writing began
+    # A new primary key, so every token is decrypted and re-issued.
+    new_key = base64.b64encode(bytes(range(1, 33))).decode()
+    (workdir / "keys.txt").write_text(f"{new_key}\n{KEY_B64}\n")
+    code, _, err = run(
+        capsys,
+        "retokenize",
+        "tokens.csv",
+        "--columns",
+        "customer_email",
+        "--key-file",
+        "keys.txt",
+        "-o",
+        f"out{suffix}",
+    )
+    assert code == 1 and "failed authentication" in err
+    assert sorted(p.name for p in workdir.iterdir() if p.name.startswith(("out", ".colgov-"))) == []
+
+
+def test_parquet_large_string_columns_are_strings(workdir, capsys):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    emails = [f"user{i}@example.com" for i in range(12)]
+    pq.write_table(pa.table({"customer_email": pa.array(emails, pa.large_string())}), "big.parquet")
+    code, _, err = run(capsys, "apply", "big.parquet", *POLICY_ARGS, "--role", "analyst", "-o", "out.parquet")
+    assert code == 0, err
+    t = Tokenizer(KEY)
+    assert pq.read_table("out.parquet").column(0).to_pylist()[0] == t.tokenize(emails[0], column="customer_email")
+
+
+def test_parquet_string_view_columns_are_strings(workdir, capsys):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    if not hasattr(pa, "string_view"):
+        pytest.skip("pyarrow < 16 has no string_view")
+    emails = [f"user{i}@example.com" for i in range(12)]
+    pq.write_table(pa.table({"customer_email": pa.array(emails, pa.string_view())}), "view.parquet")
+    code, _, err = run(capsys, "apply", "view.parquet", *POLICY_ARGS, "--role", "analyst", "-o", "out.csv")
+    assert code == 0, err
+    t = Tokenizer(KEY)
+    assert list(csv.reader(open("out.csv")))[1] == [t.tokenize(emails[0], column="customer_email")]

@@ -44,6 +44,10 @@
 
 ::: colgov.pandas
 
+## Polars
+
+::: colgov.polars
+
 ## PySpark
 
 ::: colgov.spark

@@ -153,6 +153,8 @@ def _rule(**fields):
         (_rule(min_match_ratio=0.5), "needs 'value_pattern'"),
         (_rule(typo=1), "unknown keys"),
         (_pack(rules=[_rule()["rules"][0]] * 2), "duplicate rule id"),
+        (_rule(validator="luhn"), "'validator' needs 'value_pattern'"),
+        (_rule(value_pattern="[0-9]+", validator="nope"), "unknown validator 'nope'"),
     ],
 )
 def test_invalid_packs_rejected(data, message):
@@ -171,7 +173,7 @@ def test_invalid_yaml_rejected():
 
 
 def test_builtin_unknown():
-    with pytest.raises(RulePackError, match="no built-in"):
+    with pytest.raises(RulePackError, match=r"no built-in rule pack named 'nope' \(built-in packs: core, sea\)"):
         RulePack.builtin("nope")
 
 
@@ -193,6 +195,7 @@ def test_builtin_unknown():
         ("src", ["10.0.0.1", "192.168.1.20"], "ip_address"),
         ("card_number", [], "payment_card"),
         ("x", ["4111 1111 1111 1111"], "payment_card"),
+        ("x", ["4111-1111-1111-1111", "5500 0000 0000 0004"], "payment_card"),
     ],
 )
 def test_core_pack_suggests(column, values, label):
@@ -217,3 +220,147 @@ def test_core_pack_avoids_false_positives(column, values):
     assert "postal_code" not in labels
     if column in ("amount", "company", "country"):
         assert labels == set()
+
+
+def test_core_pack_card_numbers_need_a_valid_check_digit():
+    # 16 digits in groups of four, but the Luhn check digit is wrong.
+    labels = {s.label for s in RulePack.builtin().classify_column("x", ["4111 1111 1111 1112"] * 5)}
+    assert "payment_card" not in labels
+
+
+# --- validators ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name, value, valid",
+    [
+        ("luhn", "4111 1111 1111 1111", True),
+        ("luhn", "5500-0000-0000-0004", True),
+        ("luhn", "4111111111111112", False),
+        ("luhn", "0000", False),  # too short to be a card number
+        ("my_nric", "900101-14-5678", True),
+        ("my_nric", "900101145678", True),
+        ("my_nric", "000229-10-1234", True),  # 29 Feb 2000
+        ("my_nric", "010229-10-1234", False),  # no 29 Feb in 2001 or 1901
+        ("my_nric", "901301-14-5678", False),  # month 13
+        ("my_nric", "900132-14-5678", False),  # 32 January
+        ("my_nric", "900101-00-5678", False),  # place code 00 is unassigned
+        ("my_nric", "900101-19-5678", False),  # so are 17-20
+        ("my_nric", "900101-71-5678", True),  # born abroad
+        ("my_nric", "90010114567", False),  # 11 digits
+        ("sg_nric", "S1234567D", True),
+        ("sg_nric", "s1234567d", True),
+        ("sg_nric", "T1234567J", True),
+        ("sg_nric", "F1234567N", True),
+        ("sg_nric", "G1234567X", True),
+        ("sg_nric", "S1234567A", False),  # wrong check letter
+        ("sg_nric", "M1234567K", True),  # M series: shape only
+        ("sg_nric", "X1234567D", False),
+        ("sg_nric", "S123456D", False),
+        ("id_nik", "3174051501900001", True),
+        ("id_nik", "3174055501900001", True),  # women: day + 40
+        ("id_nik", "3174059901900001", False),  # day 59 after subtracting 40
+        ("id_nik", "3174051513900001", False),  # month 13
+        ("id_nik", "0074051501900001", False),  # no province 00
+        ("id_nik", "3174051501900000", False),  # serial 0000
+        ("id_nik", "317405150190001", False),  # 15 digits
+    ],
+)
+def test_validators(name, value, valid):
+    from colgov.rules import VALIDATORS
+
+    assert VALIDATORS[name](value) is valid
+
+
+def test_validator_filters_pattern_matches():
+    pack = RulePack.from_dict(_rule(column_name=None, value_pattern="[0-9 -]+", validator="luhn", min_match_ratio=0.5))
+    [suggestion] = pack.classify_column("c", ["4111 1111 1111 1111", "4111 1111 1111 1112"])
+    assert suggestion.evidence == ("r: 1/2 sampled values match and pass luhn",)
+    assert pack.classify_column("c", ["4111 1111 1111 1112"] * 2) == []
+
+
+# --- built-in sea pack, and combining packs ------------------------------------
+
+
+@pytest.fixture(scope="module")
+def core_sea() -> RulePack:
+    return RulePack.combine(RulePack.builtin("core"), RulePack.builtin("sea"))
+
+
+def test_sea_pack_reuses_core_labels():
+    core, sea = RulePack.builtin("core"), RulePack.builtin("sea")
+    assert set(sea.labels) <= set(core.labels)
+
+
+@pytest.mark.parametrize(
+    "column, values, label",
+    [
+        # national IDs, recognised from their values alone
+        ("x", ["900101-14-5678", "850615-10-1234", "770330-08-4321"], "national_id"),
+        ("x", ["900101145678", "850615101234"], "national_id"),
+        ("x", ["S1234567D", "T1234567J", "F1234567N", "G1234567X"], "national_id"),
+        ("x", ["3174051501900001", "3174055501900001"], "national_id"),
+        # national IDs, by Malay / Indonesian / regional column names
+        ("no_kp", [], "national_id"),
+        ("kad_pengenalan", [], "national_id"),
+        ("mykad_no", [], "national_id"),
+        ("ic", [], "national_id"),
+        ("nik", [], "national_id"),
+        ("no_ktp", [], "national_id"),
+        ("fin_no", [], "national_id"),
+        ("no_paspor", [], "national_id"),
+        # phone numbers
+        ("x", ["012-345 6789", "+60 12-345 6789", "0193456789", "03-2345 6789"], "phone_number"),
+        ("x", ["+62 812-3456-7890", "081234567890"], "phone_number"),
+        ("no_telefon", [], "phone_number"),
+        ("no_hp", [], "phone_number"),
+        ("handphone", [], "phone_number"),
+        ("telepon", [], "phone_number"),
+        # other Malay / Indonesian names
+        ("nama", [], "person_name"),
+        ("nama_penuh", [], "person_name"),
+        ("nama_lengkap", [], "person_name"),
+        ("emel", [], "email"),
+        ("tarikh_lahir", [], "date_of_birth"),
+        ("tgl_lahir", [], "date_of_birth"),
+        ("poskod", [], "postal_code"),
+        ("kode_pos", [], "postal_code"),
+        ("alamat_rumah", [], "street_address"),
+    ],
+)
+def test_sea_pack_suggests(core_sea, column, values, label):
+    suggestions = core_sea.classify_column(column, values)
+    assert suggestions and suggestions[0].label == label
+
+
+@pytest.mark.parametrize(
+    "column, values",
+    [
+        ("x", ["901301-14-5678", "900132-14-5678"]),  # MyKad-shaped, impossible dates
+        ("x", ["S1234567A", "T1234567B"]),  # NRIC-shaped, wrong check letters
+        ("x", ["4111111111111111", "5500000000000004"]),  # card numbers, not NIKs
+        ("kpi", []),
+        ("finance", []),
+        ("picture", []),
+        ("namespace", []),
+    ],
+)
+def test_sea_pack_avoids_false_positives(core_sea, column, values):
+    assert "national_id" not in {s.label for s in core_sea.classify_column(column, values)}
+
+
+def test_combine(core_sea):
+    core, sea = RulePack.builtin("core"), RulePack.builtin("sea")
+    assert core_sea.name == "core+sea"
+    assert len(core_sea.rules) == len(core.rules) + len(sea.rules)
+    assert set(core_sea.labels) == set(core.labels) | set(sea.labels)
+    assert core_sea.labels["national_id"] == core.labels["national_id"]  # first pack wins
+    assert RulePack.combine(core) is core
+
+
+def test_combine_rejects_duplicate_rule_ids():
+    core = RulePack.builtin("core")
+    with pytest.raises(RulePackError, match="appears in more than one pack"):
+        RulePack.combine(core, core)
+    with pytest.raises(ValueError, match="at least one pack"):
+        RulePack.combine()

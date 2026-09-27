@@ -19,6 +19,8 @@ keywords = [
     "aes-siv",
     "deterministic-encryption",
     "column-level-security",
+    "parquet",
+    "polars",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -47,6 +49,12 @@ pandas = [
 ]
 spark = [
     "pyspark>=3.5",
+]
+polars = [
+    "polars>=1.0",
+]
+parquet = [
+    "pyarrow>=14",
 ]
 test = [
     "pytest>=7",

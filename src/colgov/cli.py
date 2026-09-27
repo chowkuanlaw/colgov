@@ -13,9 +13,13 @@
                                            reverse tokens, if the role may
     colgov retokenize data.csv --columns a,b -o out.csv
                                            re-issue tokens under the primary key
+    colgov check data.csv -c catalog.yaml  fail if any column hasn't been reviewed
     colgov audit verify audit.jsonl        check an audit log's hash chain
 
-CSV files are read as text. An empty cell is a null. ``--table`` names the
+Data files are CSV, or Parquet when the name ends in ``.parquet`` or
+``.pq`` (install ``colgov[parquet]``). CSV is read as text and an empty
+cell is a null; Parquet keeps its column types. Output is written in the
+format its file name asks for (stdout is always CSV). ``--table`` names the
 table whose catalog decisions apply (default: decisions made without one).
 
 Keys come from the ``COLGOV_MASTER_KEY`` environment variable or a file
@@ -29,16 +33,16 @@ from __future__ import annotations
 
 import argparse
 import base64
-import contextlib
-import csv
+import json
 import os
 import sys
-import tempfile
 from collections import Counter
-from collections.abc import Callable, Iterator, Sequence
-from typing import TextIO
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Any, TextIO
 
 import colgov
+from colgov._tabular import Row, Source, TabularError, open_sink, open_source
 from colgov.audit import AuditLogError, JsonlAuditLog, verify_audit_log
 from colgov.keys import KeySpecError, generate_aws_kms_key, load_keyring
 from colgov.policy import Policy, PolicyError, Treatment, record_view, summarize
@@ -58,6 +62,7 @@ _ERRORS = (
     OSError,
     PolicyError,
     RulePackError,
+    TabularError,
     UnicodeDecodeError,
 )
 
@@ -98,7 +103,7 @@ def cmd_keygen(args: argparse.Namespace) -> int:
 
 
 def cmd_classify(args: argparse.Namespace) -> int:
-    header, data = _read_csv(args.data, limit=args.sample_size)
+    header, data = _read_sample(args.data, args.sample_size)
     suggestions = _pack(args.pack).classify(data, sample_size=args.sample_size)
     for column in header:
         found = suggestions[column]
@@ -120,7 +125,7 @@ def cmd_review(
     if not args.by.strip():
         raise CliError("--by must name the reviewer")
     pack = _pack(args.pack)
-    header, data = _read_csv(args.data, limit=args.sample_size)
+    header, data = _read_sample(args.data, args.sample_size)
     catalog = Catalog.load(args.catalog) if os.path.exists(args.catalog) else Catalog()
     pending = catalog.pending(header, table=args.table)
     if not pending:
@@ -171,7 +176,7 @@ def cmd_review(
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    header = _read_header(args.data)
+    header = open_source(args.data).header
     policy, catalog = Policy.load(args.policy), Catalog.load(args.catalog)
     width = max(len(c) for c in header)
     for r in policy.plan(args.role, header, catalog, table=args.table):
@@ -189,15 +194,17 @@ def cmd_apply(args: argparse.Namespace) -> int:
     """
     if args.audit and not args.actor:
         raise CliError("--audit needs --actor")
-    header = _read_header(args.data)
+    source = open_source(args.data)
+    header = source.header
     policy, catalog = Policy.load(args.policy), Catalog.load(args.catalog)
     plan = policy.plan(args.role, header, catalog, table=args.table)
     tokenized = [r for r in plan if r.treatment is Treatment.TOKENIZE]
+    _require_strings(source, [r.column for r in tokenized])
     tokenizer = _tokenizer(args) if tokenized else None
     audit = JsonlAuditLog(args.audit) if args.audit else None
     try:
         n_rows = _check_rows_and_cardinality(args.data, header, [r.column for r in tokenized], args.min_distinct)
-    except (CliError, LowCardinalityError) as exc:
+    except (CliError, LowCardinalityError, TabularError) as exc:
         if audit is not None:
             record_view(audit, args.actor, args.role, plan, "error", str(exc), 0)
         raise
@@ -205,17 +212,16 @@ def cmd_apply(args: argparse.Namespace) -> int:
         record_view(audit, args.actor, args.role, plan, "allowed", summarize(plan), n_rows)
 
     visible = [(header.index(r.column), r) for r in plan if r.treatment is not Treatment.DENY]
-    with _output(args.output) as out:
-        writer = csv.writer(out)
-        writer.writerow(r.column for _, r in visible)
-        for _, row in _iter_rows(args.data, header):
-            out_row = []
+    types = {r.column: None if r.treatment is Treatment.TOKENIZE else source.arrow_type(r.column) for _, r in visible}
+    with open_sink(args.output, [r.column for _, r in visible], types) as write:
+        for _, row in source.rows():
+            out_row: Row = []
             for i, r in visible:
                 value = row[i]
                 if r.treatment is Treatment.TOKENIZE and value is not None:
                     value = tokenizer.tokenize(value, column=r.domain or r.column)  # type: ignore[union-attr]
-                out_row.append("" if value is None else value)
-            writer.writerow(out_row)
+                out_row.append(value)
+            write(out_row)
     denied = [r.column for r in plan if r.treatment is Treatment.DENY]
     if denied:
         print(f"colgov: left out {len(denied)} column(s): {', '.join(denied)}", file=sys.stderr)
@@ -246,12 +252,14 @@ def cmd_detokenize(args: argparse.Namespace) -> int:
 
 
 def cmd_retokenize(args: argparse.Namespace) -> int:
-    header = _read_header(args.data)
+    source = open_source(args.data)
+    header = source.header
     columns = [c.strip() for c in args.columns.split(",") if c.strip()]
     missing = [c for c in columns if c not in header]
     if not columns or missing:
         detail = f"; not found: {', '.join(missing)}" if missing else ""
         raise CliError(f"--columns must name columns of {args.data}{detail}")
+    _require_strings(source, columns)
     catalog = Catalog.load(args.catalog) if args.catalog else None
     tokenizer = _tokenizer(args)
     targets = []
@@ -259,17 +267,75 @@ def cmd_retokenize(args: argparse.Namespace) -> int:
         decision = catalog.get(column, table=args.table) if catalog else None
         targets.append((header.index(column), decision.token_domain if decision else column))
     changed = 0
-    with _output(args.output) as out:
-        writer = csv.writer(out)
-        writer.writerow(header)
-        for _, row in _iter_rows(args.data, header):
+    types = {c: source.arrow_type(c) for c in header}
+    with open_sink(args.output, header, types) as write:
+        for _, row in source.rows():
             for i, domain in targets:
                 new = tokenizer.retokenize(row[i], column=domain)
                 changed += new != row[i]
                 row[i] = new
-            writer.writerow("" if v is None else v for v in row)
+            write(row)
     print(f"colgov: re-issued {changed} token(s) under key {tokenizer.keyring.primary_id}", file=sys.stderr)
     return 0
+
+
+@dataclass(frozen=True)
+class _Finding:
+    level: str  # "error" or "warning"
+    table: str | None
+    column: str
+    message: str
+
+    def where(self) -> str:
+        return f"{self.table}.{self.column}" if self.table else self.column
+
+
+def cmd_check(args: argparse.Namespace, out: TextIO | None = None) -> int:
+    """Fail when a schema has columns nobody has reviewed.
+
+    Run it in CI so a new column can't reach production unreviewed. With
+    --policy it also warns about decisions whose label no role is granted,
+    and it always warns about decisions for columns that no longer exist.
+    """
+    out = out or sys.stdout
+    catalog = Catalog.load(args.catalog)
+    policy = Policy.load(args.policy) if args.policy else None
+    schemas: dict[str | None, list[str]] = {}
+    for path in args.schemas:
+        for table, columns in _schema_tables(path, args.table).items():
+            known = schemas.setdefault(table, [])
+            known.extend(c for c in columns if c not in known)
+
+    findings: list[_Finding] = []
+    granted = policy.granted_labels if policy else None
+    for table, columns in schemas.items():
+        for column in columns:
+            decision = catalog.get(column, table=table)
+            if decision is None:
+                findings.append(_Finding("error", table, column, "not reviewed"))
+            elif granted is not None and decision.label not in granted:
+                findings.append(
+                    _Finding("warning", table, column, f"label {decision.label!r} is not granted to any role")
+                )
+        present = set(columns)
+        for decision in catalog:
+            if decision.table == table and decision.column not in present:
+                findings.append(_Finding("warning", table, decision.column, "has a decision but is not in the schema"))
+
+    for f in findings:
+        if args.format == "github":
+            title = "Unreviewed column" if f.level == "error" else "colgov"
+            print(f"::{f.level} title={title}::{f.where()}: {f.message}", file=out)
+        else:
+            print(f"{f.level}: {f.where()}: {f.message}", file=out)
+    errors = sum(f.level == "error" for f in findings)
+    warnings = len(findings) - errors
+    n_columns = sum(len(c) for c in schemas.values())
+    print(
+        f"colgov check: {errors} error(s), {warnings} warning(s) in {len(schemas)} table(s), {n_columns} column(s)",
+        file=out,
+    )
+    return 1 if errors or (args.strict and warnings) else 0
 
 
 def cmd_audit_verify(args: argparse.Namespace) -> int:
@@ -282,40 +348,66 @@ def cmd_audit_verify(args: argparse.Namespace) -> int:
 
 
 def _pack(spec: str) -> RulePack:
-    return RulePack.load(spec) if os.path.exists(spec) else RulePack.builtin(spec)
+    """A pack by name or path, or several joined with commas (``core,sea``)."""
+    parts = [p.strip() for p in spec.split(",") if p.strip()]
+    if not parts:
+        raise CliError("--pack must name at least one rule pack")
+    return RulePack.combine(*(RulePack.load(p) if os.path.exists(p) else RulePack.builtin(p) for p in parts))
 
 
-def _read_header(path: str) -> list[str]:
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        header = next(csv.reader(f), None)
-    if not header:
-        raise CliError(f"{path}: no header row")
-    if len(set(header)) != len(header) or not all(header):
-        raise CliError(f"{path}: column names must be unique and non-empty")
-    return header
+def _read_sample(path: str, limit: int) -> tuple[list[str], dict[str, list[Any]]]:
+    source = open_source(path)
+    return source.header, source.sample(limit)
 
 
-def _iter_rows(path: str, header: list[str]) -> Iterator[tuple[int, list[str | None]]]:
-    """Yield (line number, values) for each data row; empty cells are None."""
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.reader(f)
-        next(reader, None)
-        for lineno, row in enumerate(reader, start=2):
-            if len(row) != len(header):
-                raise CliError(f"{path}, line {lineno}: expected {len(header)} fields, got {len(row)}")
-            yield lineno, [v if v != "" else None for v in row]
+def _require_strings(source: Source, columns: Sequence[str]) -> None:
+    for column in columns:
+        if not source.is_string(column):
+            raise CliError(
+                f"column {column!r} is {source.type_name(column)}, not a string; cast it to string before tokenizing"
+            )
 
 
-def _read_csv(path: str, *, limit: int | None = None) -> tuple[list[str], dict[str, list[str | None]]]:
-    """Read a CSV file (or its first ``limit`` rows) into columns."""
-    header = _read_header(path)
-    data: dict[str, list[str | None]] = {c: [] for c in header}
-    for n, (_, row) in enumerate(_iter_rows(path, header)):
-        if limit is not None and n >= limit:
-            break
-        for column, value in zip(header, row, strict=True):
-            data[column].append(value)
-    return header, data
+def _schema_tables(path: str, table: str | None) -> dict[str | None, list[str]]:
+    """Table name -> column names, from a data file or a dbt manifest.json / catalog.json."""
+    if path.lower().endswith(".json"):
+        if table is not None:
+            raise CliError("--table can't be used with a dbt file: each model is its own table")
+        return _dbt_tables(path)
+    return {table: open_source(path).header}
+
+
+def _dbt_tables(path: str) -> dict[str | None, list[str]]:
+    """Columns of every model, seed, snapshot and source in a dbt artifact.
+
+    Models, seeds and snapshots are named by their dbt name; sources as
+    ``<source name>.<table name>``. manifest.json lists only documented
+    columns; catalog.json (from ``dbt docs generate``) lists every column
+    the warehouse reports.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise CliError(f"{path}: not valid JSON: {exc}") from None
+    version = str(data.get("metadata", {}).get("dbt_schema_version", "")) if isinstance(data, dict) else ""
+    if "/manifest/" not in version and "/catalog/" not in version:
+        raise CliError(f"{path}: not a dbt manifest.json or catalog.json")
+    tables: dict[str | None, list[str]] = {}
+    for section in ("nodes", "sources"):
+        for unique_id, node in (data.get(section) or {}).items():
+            kind, _, rest = unique_id.partition(".")
+            if kind not in ("model", "seed", "snapshot", "source"):
+                continue
+            parts = rest.split(".")  # package, [source name,] name[, version]
+            if kind == "source":
+                name = f"{parts[1]}.{parts[2]}" if len(parts) >= 3 else rest
+            else:
+                name = node.get("name") or parts[1]
+            columns = [str(c.get("name") or key) for key, c in (node.get("columns") or {}).items()]
+            if columns:
+                tables.setdefault(name, []).extend(columns)
+    return tables
 
 
 def _check_rows_and_cardinality(path: str, header: list[str], columns: list[str], min_distinct: int) -> int:
@@ -325,15 +417,13 @@ def _check_rows_and_cardinality(path: str, header: list[str], columns: list[str]
     so memory stays bounded. A column that never does has been tracked in
     full, so its reported profile is exact.
     """
-    positions = [(c, header.index(c)) for c in columns]
-    counts: dict[str, Counter[str]] = {c: Counter() for c in columns}
+    counts: dict[str, Counter[Any]] = {c: Counter() for c in columns}
     nulls = dict.fromkeys(columns, 0)
     open_columns = set(columns)
     n_rows = 0
-    for _, row in _iter_rows(path, header):
+    for _, row in open_source(path).rows(columns):
         n_rows += 1
-        for column, i in positions:
-            value = row[i]
+        for column, value in zip(columns, row, strict=True):
             if value is None:
                 nulls[column] += 1
             elif column in open_columns:
@@ -352,24 +442,6 @@ def _check_rows_and_cardinality(path: str, header: list[str], columns: list[str]
             )
             raise LowCardinalityError(column, risk, min_distinct)
     return n_rows
-
-
-@contextlib.contextmanager
-def _output(path: str) -> Iterator[TextIO]:
-    """Write to stdout, or to ``path`` atomically: a temp file renamed on success."""
-    if path == "-":
-        yield sys.stdout
-        return
-    directory = os.path.dirname(os.path.abspath(path))
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".colgov-", suffix=".csv.tmp")
-    try:
-        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
-            yield f
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp)
-        raise
 
 
 def _tokenizer(args: argparse.Namespace) -> Tokenizer:
@@ -400,7 +472,11 @@ def _parser() -> argparse.ArgumentParser:
         return p
 
     def pack_args(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--pack", default="core", help="built-in pack name or path to a YAML pack (default: core)")
+        p.add_argument(
+            "--pack",
+            default="core",
+            help="built-in pack names or YAML pack paths, comma-separated, e.g. core,sea (default: core)",
+        )
         p.add_argument("--sample-size", type=int, default=1000, help="values sampled per column (default: 1000)")
 
     def policy_args(p: argparse.ArgumentParser) -> None:
@@ -417,28 +493,28 @@ def _parser() -> argparse.ArgumentParser:
     p = add("keygen", cmd_keygen, "print a new master key spec (base64, or aws-kms:... with --aws-kms-key-id)")
     p.add_argument("--aws-kms-key-id", help="protect the new key with this AWS KMS key (id, ARN or alias/...)")
 
-    p = add("classify", cmd_classify, "suggest labels for each column of a CSV file")
-    p.add_argument("data", help="CSV file with a header row")
+    p = add("classify", cmd_classify, "suggest labels for each column of a data file")
+    p.add_argument("data", help="CSV or Parquet file")
     pack_args(p)
 
     p = add("review", cmd_review, "decide each unreviewed column's label, interactively")
-    p.add_argument("data", help="CSV file with a header row")
+    p.add_argument("data", help="CSV or Parquet file")
     p.add_argument("-c", "--catalog", required=True, help="catalog YAML file (created if missing)")
     p.add_argument("--by", required=True, help="your name, recorded with each decision")
     table_arg(p)
     pack_args(p)
 
     p = add("plan", cmd_plan, "show how each column would be treated for a role, and why")
-    p.add_argument("data", help="CSV file (only the header row is read)")
+    p.add_argument("data", help="CSV or Parquet file (only the column names are read)")
     policy_args(p)
     table_arg(p)
 
-    p = add("apply", cmd_apply, "write the view of a CSV file that a role may see")
-    p.add_argument("data", help="CSV file with a header row")
+    p = add("apply", cmd_apply, "write the view of a data file that a role may see")
+    p.add_argument("data", help="CSV or Parquet file")
     policy_args(p)
     table_arg(p)
     key_args(p)
-    p.add_argument("-o", "--output", default="-", help="output CSV file (default: stdout)")
+    p.add_argument("-o", "--output", default="-", help="output file, CSV or .parquet (default: CSV to stdout)")
     p.add_argument(
         "--min-distinct",
         type=int,
@@ -458,13 +534,31 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--audit", required=True, help="JSONL audit log to append to")
     p.add_argument("tokens", nargs="?", default="-", help="file with one token per line (default: stdin)")
 
-    p = add("retokenize", cmd_retokenize, "re-issue tokens in a CSV file under the primary key (after rotating keys)")
-    p.add_argument("data", help="CSV file with a header row")
+    p = add("retokenize", cmd_retokenize, "re-issue tokens in a data file under the primary key (after rotating keys)")
+    p.add_argument("data", help="CSV or Parquet file")
     p.add_argument("--columns", required=True, help="comma-separated tokenized columns to migrate")
     p.add_argument("-c", "--catalog", help="catalog YAML, to use each column's token domain (default: column name)")
     table_arg(p)
     key_args(p)
-    p.add_argument("-o", "--output", default="-", help="output CSV file (default: stdout)")
+    p.add_argument("-o", "--output", default="-", help="output file, CSV or .parquet (default: CSV to stdout)")
+
+    p = add("check", cmd_check, "fail if any column in a schema has not been reviewed (for CI)")
+    p.add_argument(
+        "schemas",
+        nargs="+",
+        metavar="SCHEMA",
+        help="CSV or Parquet files (only column names are read), or a dbt manifest.json / catalog.json",
+    )
+    p.add_argument("-c", "--catalog", required=True, help="catalog YAML file")
+    p.add_argument("-p", "--policy", help="policy YAML file: also warn about labels no role is granted")
+    table_arg(p)
+    p.add_argument("--strict", action="store_true", help="fail on warnings too")
+    p.add_argument(
+        "--format",
+        choices=["text", "github"],
+        default="text",
+        help="github: annotations for GitHub Actions (default: text)",
+    )
 
     audit = sub.add_parser("audit", help="audit log tools", description="audit log tools")
     audit_sub = audit.add_subparsers(dest="audit_command", required=True, metavar="COMMAND")

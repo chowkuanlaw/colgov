@@ -92,5 +92,6 @@ rules:
   - id: payment-card-value
     label: payment_card
     value_pattern: '[0-9]{4}([ -]?[0-9]{4}){3}'
+    validator: luhn
     min_match_ratio: 0.9
-    confidence: 0.7
+    confidence: 0.9

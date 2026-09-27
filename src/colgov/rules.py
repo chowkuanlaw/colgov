@@ -27,13 +27,20 @@ A minimal pack::
 column name. ``value_pattern`` is a regex that must match a whole value;
 the rule fires when at least ``min_match_ratio`` of the sampled non-null
 values match. A rule with both fires only when both match.
+
+A value rule may also name a ``validator``, a check built into colgov that
+a value must pass as well as the pattern: ``luhn`` (payment card check
+digit), ``my_nric`` (Malaysian MyKad: date of birth and place-of-birth
+code), ``sg_nric`` (Singapore NRIC/FIN) or ``id_nik`` (Indonesian NIK:
+province code and date of birth). Packs can't run their own code.
 """
 
 from __future__ import annotations
 
+import calendar
 import itertools
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from importlib import resources
 from os import PathLike
@@ -58,7 +65,7 @@ DEFAULT_MIN_MATCH_RATIO = 0.8
 
 _PACK_KEYS = {"pack", "version", "description", "labels", "rules"}
 _LABEL_KEYS = {"description"}
-_RULE_KEYS = {"id", "label", "column_name", "value_pattern", "min_match_ratio", "confidence"}
+_RULE_KEYS = {"id", "label", "column_name", "value_pattern", "min_match_ratio", "confidence", "validator"}
 
 
 class RulePackError(ValueError):
@@ -79,6 +86,7 @@ class Rule:
     column_name: re.Pattern[str] | None = None
     value_pattern: re.Pattern[str] | None = None
     min_match_ratio: float = DEFAULT_MIN_MATCH_RATIO
+    validator: str | None = None
 
 
 @dataclass(frozen=True)
@@ -104,12 +112,53 @@ class RulePack:
 
     @classmethod
     def builtin(cls, name: str = "core") -> RulePack:
-        """Load a pack shipped with colgov. ``core`` covers common PII."""
+        """Load a pack shipped with colgov.
+
+        ``core`` covers common personal data. ``sea`` adds Malaysia,
+        Singapore and Indonesia: national ID numbers checked beyond their
+        shape, local phone numbers, and Malay and Indonesian column names.
+        Use it together with ``core``: ``RulePack.combine(core, sea)``.
+        """
         try:
             text = resources.files("colgov.packs").joinpath(f"{name}.yaml").read_text("utf-8")
         except FileNotFoundError:
-            raise RulePackError(f"no built-in rule pack named {name!r}") from None
+            known = ", ".join(builtin_pack_names())
+            raise RulePackError(f"no built-in rule pack named {name!r} (built-in packs: {known})") from None
         return cls.from_yaml(text)
+
+    @classmethod
+    def combine(cls, *packs: RulePack) -> RulePack:
+        """One pack with the labels and rules of all of ``packs``, in order.
+
+        A label declared by several packs keeps the first description. Rule
+        IDs must be unique across the packs.
+
+        >>> both = RulePack.combine(RulePack.builtin("core"), RulePack.builtin("sea"))
+        >>> both.name
+        'core+sea'
+        """
+        if not packs:
+            raise ValueError("combine needs at least one pack")
+        if len(packs) == 1:
+            return packs[0]
+        labels: dict[str, Label] = {}
+        rules: list[Rule] = []
+        seen_ids: set[str] = set()
+        for pack in packs:
+            for name, label in pack.labels.items():
+                labels.setdefault(name, label)
+            for rule in pack.rules:
+                if rule.id in seen_ids:
+                    raise RulePackError(f"rule id {rule.id!r} appears in more than one pack")
+                seen_ids.add(rule.id)
+                rules.append(rule)
+        return cls(
+            name="+".join(p.name for p in packs),
+            version=1,
+            labels=labels,
+            rules=tuple(rules),
+            description="Combined: " + ", ".join(p.name for p in packs),
+        )
 
     @classmethod
     def load(cls, path: str | PathLike[str]) -> RulePack:
@@ -239,6 +288,13 @@ def _parse_rule(spec: dict[str, Any], pack: str, index: int, labels: Mapping[str
     min_match_ratio = _ratio(spec, "min_match_ratio", where, required=False)
     if min_match_ratio is not None and value_pattern is None:
         raise RulePackError(f"{where}: 'min_match_ratio' needs 'value_pattern'")
+    validator = spec.get("validator")
+    if validator is not None:
+        if value_pattern is None:
+            raise RulePackError(f"{where}: 'validator' needs 'value_pattern'")
+        if validator not in VALIDATORS:
+            known = ", ".join(sorted(VALIDATORS))
+            raise RulePackError(f"{where}: unknown validator {validator!r} (known: {known})")
 
     return Rule(
         id=rule_id,
@@ -247,6 +303,7 @@ def _parse_rule(spec: dict[str, Any], pack: str, index: int, labels: Mapping[str
         column_name=column_name,
         value_pattern=value_pattern,
         min_match_ratio=(DEFAULT_MIN_MATCH_RATIO if min_match_ratio is None else min_match_ratio),
+        validator=validator,
     )
 
 
@@ -259,11 +316,13 @@ def _match(rule: Rule, column: str, sample: list[str]) -> tuple[str, ...] | None
     if rule.value_pattern is not None:
         if not sample:
             return None
-        hits = sum(1 for v in sample if rule.value_pattern.fullmatch(v))
+        check = VALIDATORS[rule.validator] if rule.validator else None
+        hits = sum(1 for v in sample if rule.value_pattern.fullmatch(v) and (check is None or check(v)))
         ratio = hits / len(sample)
         if ratio < rule.min_match_ratio:
             return None
-        evidence.append(f"{rule.id}: {hits}/{len(sample)} sampled values match")
+        checked = f" and pass {rule.validator}" if rule.validator else ""
+        evidence.append(f"{rule.id}: {hits}/{len(sample)} sampled values match{checked}")
     return tuple(evidence)
 
 
@@ -301,3 +360,105 @@ def _ratio(spec: dict[str, Any], key: str, where: str, *, required: bool) -> flo
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
         raise RulePackError(f"{where}: {key!r} must be a number in (0, 1]")
     return float(value)
+
+
+def builtin_pack_names() -> list[str]:
+    """Names of the rule packs shipped with colgov."""
+    return sorted(
+        entry.name.removesuffix(".yaml")
+        for entry in resources.files("colgov.packs").iterdir()
+        if entry.name.endswith(".yaml")
+    )
+
+
+# --- validators -----------------------------------------------------------------
+#
+# Checks a value must pass on top of a rule's value_pattern. They see the
+# stripped value, which has already matched the pattern.
+
+
+def _luhn(value: str) -> bool:
+    """Payment card check digit (ISO/IEC 7812)."""
+    digits = [int(c) for c in value if c.isdigit()]
+    if len(digits) < 12:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def _valid_yymmdd(yy: int, mm: int, dd: int) -> bool:
+    """A real calendar date in 19yy or 20yy (29 February if either is a leap year)."""
+    if not 1 <= mm <= 12:
+        return False
+    return 1 <= dd <= calendar.monthrange(2000 + yy, mm)[1]
+
+
+# Malaysian place-of-birth codes (digits 7-8 of a MyKad number): states and
+# federal territories (01-16, 21-59), countries and regions abroad
+# (60-68, 71-72, 74-79, 83-93, 98-99), and unknown state (82).
+_MY_PLACE_CODES = frozenset(
+    [*range(1, 17), *range(21, 60), *range(60, 69), 71, 72, *range(74, 80), 82, *range(83, 94), 98, 99]
+)
+
+
+def _my_nric(value: str) -> bool:
+    """Malaysian MyKad number: YYMMDD-PB-###G with a real date and place code."""
+    digits = value.replace("-", "").replace(" ", "")
+    if len(digits) != 12 or not digits.isdigit():
+        return False
+    yy, mm, dd = int(digits[0:2]), int(digits[2:4]), int(digits[4:6])
+    return _valid_yymmdd(yy, mm, dd) and int(digits[6:8]) in _MY_PLACE_CODES
+
+
+_SG_WEIGHTS = (2, 7, 6, 5, 4, 3, 2)
+_SG_CHECK = {
+    "S": (0, "JZIHGFEDCBA"),
+    "T": (4, "JZIHGFEDCBA"),
+    "F": (0, "XWUTRQPNMLK"),
+    "G": (4, "XWUTRQPNMLK"),
+}
+
+
+def _sg_nric(value: str) -> bool:
+    """Singapore NRIC/FIN. The check letter is verified for S, T, F and G
+    numbers; M-series FINs are checked for shape only."""
+    s = value.strip().upper()
+    if len(s) != 9 or s[0] not in "STFGM" or not s[1:8].isdigit() or not s[8].isalpha():
+        return False
+    if s[0] == "M":
+        return True
+    offset, letters = _SG_CHECK[s[0]]
+    total = offset + sum(int(c) * w for c, w in zip(s[1:8], _SG_WEIGHTS, strict=True))
+    return s[8] == letters[total % 11]
+
+
+# Indonesian province codes (digits 1-2 of a NIK).
+_ID_PROVINCES = frozenset(
+    [*range(11, 20), 21, *range(31, 37), *range(51, 54), *range(61, 66), *range(71, 77), 81, 82, *range(91, 98)]
+)
+
+
+def _id_nik(value: str) -> bool:
+    """Indonesian NIK: province code and date of birth (day + 40 for women)."""
+    d = value.strip()
+    if len(d) != 16 or not d.isdigit() or int(d[0:2]) not in _ID_PROVINCES:
+        return False
+    day = int(d[6:8])
+    if day > 40:
+        day -= 40
+    return _valid_yymmdd(int(d[10:12]), int(d[8:10]), day) and d[12:16] != "0000"
+
+
+VALIDATORS: Mapping[str, Callable[[str], bool]] = {
+    "luhn": _luhn,
+    "my_nric": _my_nric,
+    "sg_nric": _sg_nric,
+    "id_nik": _id_nik,
+}
+"""Checks a rule can name with ``validator:``."""
