@@ -1,0 +1,99 @@
+# colgov sea rule pack: personal data from Malaysia, Singapore and Indonesia.
+#
+# Use it with core (`--pack core,sea`, or RulePack.combine): it reuses core's
+# label names, so the same policy covers both. Rules only suggest labels; a
+# person confirms or overrides every one.
+#
+# National ID values are checked beyond their shape (see `validator`): a
+# MyKad number must carry a real date of birth and place-of-birth code, a
+# Singapore NRIC/FIN its check letter, and an Indonesian NIK a province code
+# and date of birth. Column names are matched in English, Malay and
+# Indonesian.
+
+pack: sea
+version: 1
+description: Malaysia, Singapore and Indonesia personal data, with Malay and Indonesian column names.
+
+labels:
+  national_id:
+    description: Government-issued identifier (MyKad, NRIC/FIN, NIK, passport)
+  phone_number:
+    description: Telephone or mobile number
+  person_name:
+    description: A person's full, given or family name
+  email:
+    description: Email address
+  date_of_birth:
+    description: Date of birth
+  postal_code:
+    description: Postal code (poskod, kode pos)
+  street_address:
+    description: Street or mailing address (alamat)
+
+rules:
+  # --- national ID --------------------------------------------------------------
+  - id: sea-national-id-name
+    label: national_id
+    column_name: 'mykad|nric|kad_?pengenalan|(^|_)(no_?)?kp(_|$)|(^|_)ic(_|$)|(^|_)nik(_|$)|(^|_)ktp(_|$)|(^|_)fin_?(no|num|number)(_|$)|pasport|paspor'
+    confidence: 0.8
+  - id: sea-mykad-value
+    label: national_id
+    value_pattern: '[0-9]{6}-?[0-9]{2}-?[0-9]{4}'
+    validator: my_nric
+    min_match_ratio: 0.9
+    confidence: 0.9
+  - id: sea-sg-nric-value
+    label: national_id
+    value_pattern: '[STFGMstfgm][0-9]{7}[A-Za-z]'
+    validator: sg_nric
+    min_match_ratio: 0.9
+    confidence: 0.9
+  - id: sea-id-nik-value
+    label: national_id
+    value_pattern: '[0-9]{16}'
+    validator: id_nik
+    min_match_ratio: 0.9
+    confidence: 0.85
+
+  # --- phone numbers ------------------------------------------------------------
+  - id: sea-phone-name
+    label: phone_number
+    column_name: 'telefon|telepon|handphone|(^|_)(no_?)?(tel|hp)(_|$)|no_?hp|nombor_?tel'
+    confidence: 0.7
+  - id: sea-my-phone-value
+    label: phone_number
+    value_pattern: '(\+?60|0)[ -]?(1[0-9]|[3-9])[ -]?[0-9]{3,4}[ -]?[0-9]{4}'
+    min_match_ratio: 0.9
+    confidence: 0.75
+  - id: sea-sg-phone-value
+    label: phone_number
+    value_pattern: '(\+?65[ -]?)?[689][0-9]{3}[ -]?[0-9]{4}'
+    min_match_ratio: 0.9
+    confidence: 0.6
+  - id: sea-id-phone-value
+    label: phone_number
+    value_pattern: '(\+?62|0)[ -]?8[0-9]{1,2}[ -]?[0-9]{3,4}[ -]?[0-9]{3,5}'
+    min_match_ratio: 0.9
+    confidence: 0.7
+
+  # --- Malay and Indonesian column names ------------------------------------------
+  - id: sea-person-name-name
+    label: person_name
+    column_name: '(^|_)nama(_|$)|nama_?(penuh|lengkap|pelanggan)'
+    confidence: 0.7
+  - id: sea-email-name
+    label: email
+    column_name: '(^|_)emel(_|$)|(^|_)surel(_|$)'
+    confidence: 0.7
+  - id: sea-dob-name
+    label: date_of_birth
+    column_name: 'tarikh_?lahir|tanggal_?lahir|(^|_)tgl_?lahir(_|$)'
+    confidence: 0.8
+  - id: sea-postal-code-name
+    label: postal_code
+    column_name: 'poskod|kod_?pos|kode_?pos'
+    confidence: 0.7
+  - id: sea-street-address-name
+    label: street_address
+    column_name: 'alamat'
+    confidence: 0.7

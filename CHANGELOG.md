@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.1.0 — unreleased
+
+New features, with no changes to the token format, file formats or
+existing APIs. Everything from 1.0 works unchanged.
+
+### Added
+
+- **`colgov check`,** to stop unreviewed columns in CI. It reads column
+  names from CSV or Parquet files, or from a dbt `manifest.json` or
+  `catalog.json` (each model as its own table), and exits with status 1 if
+  any column has no decision.
+  - It warns about decisions for columns that no longer exist, and, with
+    `--policy`, about labels no role is granted. `--strict` fails on
+    warnings.
+  - `--format github` prints GitHub Actions annotations.
+- **`sea` rule pack** for Malaysia, Singapore and Indonesia:
+  - MyKad, NRIC/FIN and NIK numbers are recognised from their values and
+    checked beyond their shape: dates of birth, place-of-birth and province
+    codes, and NRIC/FIN check letters.
+  - Local phone numbers, and Malay and Indonesian column names (`no_kp`,
+    `nama`, `alamat`, `tarikh_lahir`, `poskod`, `nik`, `no_hp`, ...).
+  - It uses `core`'s label names, so one policy covers both.
+- **Validators in rule packs.** A rule's optional `validator:` names a check
+  built into colgov that values must pass as well as the pattern: `luhn`,
+  `my_nric`, `sg_nric` or `id_nik`. Packs that use it need colgov 1.1.
+- **`RulePack.combine`,** and `--pack core,sea` on the command line, to use
+  several packs together.
+- **Parquet in the CLI.** `classify`, `review`, `plan`, `apply`, `retokenize`
+  and `check` read Parquet, and `apply` and `retokenize` write it, chosen by
+  the `.parquet` or `.pq` extension. It is streamed in batches, and `clear`
+  columns keep their types. Install with `pip install "colgov[parquet]"`.
+- **`colgov.polars`:** `classify`, `apply` and `detokenize` for Polars
+  DataFrames, like `colgov.pandas`. Install with
+  `pip install "colgov[polars]"`.
+- **`Policy.granted_labels`:** the labels at least one role may see.
+
+### Changed
+
+- **Payment card numbers need a valid check digit.** `core`'s
+  `payment-card-value` rule now uses the Luhn check, so random 16-digit
+  numbers are no longer suggested as cards. Its confidence rose from 0.7 to
+  0.9.
+
 ## 1.0.0 — 2026-09-24
 
 First stable release. The code is identical to 1.0.0rc1. From this release,

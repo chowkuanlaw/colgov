@@ -204,9 +204,39 @@ rules:
 
 Load it with `RulePack.load("my-org.yaml")`. Packs are validated strictly:
 unknown keys, undeclared labels, invalid regexes and duplicate rule ids are
-all rejected when the pack loads. The built-in `core` pack covers email,
-phone numbers, names, national IDs, dates of birth, postal codes, street
-addresses, IP addresses and payment cards.
+all rejected when the pack loads.
+
+A value rule can also name a `validator`, a check built into colgov that
+each value must pass as well as the pattern: `luhn` (payment cards),
+`my_nric`, `sg_nric` or `id_nik`. A pattern alone can't tell a real ID
+number from any other string of digits the same length.
+
+### Built-in rule packs
+
+- **`core`:** email, phone numbers, names, national IDs, dates of birth,
+  postal codes, street addresses, IP addresses, and payment cards (with a
+  Luhn check).
+- **`sea`:** Malaysia, Singapore and Indonesia. It recognises ID numbers
+  from their values, not only their column names:
+
+  | Value | Checked |
+  |---|---|
+  | Malaysian MyKad (`900101-14-5678`) | a real date of birth and place-of-birth code |
+  | Singapore NRIC/FIN (`S1234567D`) | the check letter (S, T, F and G series) |
+  | Indonesian NIK (16 digits) | province code and date of birth |
+  | Malaysian, Singapore and Indonesian phone numbers | local formats |
+
+  It also knows Malay and Indonesian column names, such as `no_kp`, `nama`,
+  `alamat`, `tarikh_lahir`, `poskod`, `nik` and `no_hp`.
+
+`sea` uses the same label names as `core`, so one policy covers both. Use
+them together:
+
+```python
+pack = RulePack.combine(RulePack.builtin("core"), RulePack.builtin("sea"))
+```
+
+On the command line, pass `--pack core,sea`.
 
 ### Detokenization, with an audit trail
 
@@ -268,10 +298,10 @@ A column's token domain defaults to its name, so same-named columns join
 across tables. Set `domain=` to join differently named columns, or to keep
 same-named columns apart. The CLI takes `--table` for the same purpose.
 
-### pandas and PySpark
+### pandas, Polars and PySpark
 
 ```bash
-pip install "colgov[pandas]"   # or "colgov[spark]"
+pip install "colgov[pandas]"   # or "colgov[polars]", "colgov[spark]"
 ```
 
 ```python
@@ -282,6 +312,10 @@ view = cpd.apply(df, policy, role="analyst", catalog=catalog, tokenizer=t)
 plain = cpd.detokenize(view["customer_email"], policy, role="support", catalog=catalog,
                        tokenizer=t, actor="carol", purpose="TICKET-4521", audit=audit)
 
+from colgov import polars as cpl
+
+view = cpl.apply(df, policy, role="analyst", catalog=catalog, tokenizer=t)  # same API, Polars DataFrames
+
 from colgov import spark as cspark
 
 view = cspark.apply(sdf, policy, role="analyst", catalog=catalog, tokenizer=t)  # lazy DataFrame
@@ -289,11 +323,14 @@ view = cspark.apply(sdf, policy, role="analyst", catalog=catalog, tokenizer=t)  
 
 - **pandas:** the index and the dtypes of `clear` columns are kept. `None`,
   `NaN` and `pd.NA` all count as null.
+- **Polars:** `clear` columns keep their dtype, and tokenized columns
+  become `String`. `Categorical` columns can be tokenized. Pass an eager
+  `DataFrame`, so call `.collect()` on a `LazyFrame` first.
 - **Spark:** tokenization runs in a UDF on the executors, and the
   cardinality check is a single aggregation. The master key is shipped to
   the executors, so colgov must be installed there, and you should only use
   a cluster you trust with the key.
-- **Both:** tokenized columns must hold strings, so cast other types first.
+- **All three:** tokenized columns must hold strings, so cast other types first.
 
 ### Command line
 
@@ -320,7 +357,43 @@ Add `--table customers` to `review`, `plan`, `apply` and `detokenize` to use
 that table's catalog decisions.
 
 `review` shows suggestions and the evidence for them, but never the
-column's values. In the CSV files, empty cells are treated as nulls.
+column's values.
+
+**Parquet.** Every command that reads or writes data also takes Parquet.
+The format comes from the file name (`.parquet` or `.pq`), so `apply
+customers.parquet -o analyst.parquet` stays Parquet. Parquet is read and
+written in batches, so memory stays bounded, and `clear` columns keep their
+types. Install it with `pip install "colgov[parquet]"`. In CSV files, empty
+cells are nulls.
+
+### Checking for unreviewed columns in CI
+
+`colgov check` fails when a schema has a column nobody has reviewed. Run it
+on every pull request, so a new column can't reach production until a
+person has decided what it holds:
+
+```bash
+colgov check customers.parquet -c catalog.yaml --table customers
+colgov check target/catalog.json -c catalog.yaml -p policy.yaml   # every dbt model
+```
+
+- **Schemas:** CSV or Parquet files (only the column names are read), or a
+  dbt `manifest.json` or `catalog.json`. In a dbt file, each model is a
+  table named after the model, and a source is `<source>.<table>`.
+  `manifest.json` only lists documented columns, while `catalog.json` (from
+  `dbt docs generate`) lists every column in the warehouse.
+- **Errors (exit status 1):** columns with no decision.
+- **Warnings:** decisions for columns that no longer exist, and, with
+  `--policy`, labels that no role is granted. Pass `--strict` to fail on
+  warnings too.
+- **GitHub Actions:** `--format github` shows each finding as an annotation
+  on the pull request.
+
+```yaml
+# .github/workflows/pii.yml
+- run: pip install "colgov[parquet]"
+- run: colgov check target/catalog.json -c governance/catalog.yaml --format github
+```
 
 ## Roadmap
 
@@ -354,10 +427,18 @@ column's values. In the CSV files, empty cells are treated as nulls.
 - [x] 1.0.0 release candidate (`1.0.0rc1`)
 - [x] 1.0.0
 
-**After 1.0**
+**v1.1**
+
+- [x] `colgov check`: fail CI on unreviewed columns (CSV, Parquet, dbt)
+- [x] `sea` rule pack: MyKad, NRIC/FIN and NIK checked beyond their shape
+- [x] Parquet in the CLI, and Polars helpers
+
+**After 1.1**
 
 - [ ] Independent review of the cryptographic design
 - [ ] Optional Presidio bridge for value-shape detection
+- [ ] `colgov report`: a catalog and risk summary for auditors
+- [ ] SQL view generation for warehouses
 
 ## Scope
 

@@ -4,6 +4,10 @@ import importlib.util
 
 collect_ignore = [
     path
-    for module, path in [("pandas", "src/colgov/pandas.py"), ("pyspark", "src/colgov/spark.py")]
+    for module, path in [
+        ("pandas", "src/colgov/pandas.py"),
+        ("pyspark", "src/colgov/spark.py"),
+        ("polars", "src/colgov/polars.py"),
+    ]
     if importlib.util.find_spec(module) is None
 ]

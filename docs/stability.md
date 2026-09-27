@@ -7,7 +7,7 @@ page defines what counts as the public API that promise covers. Before
 ## Public
 
 - **Package names:** everything listed in `__all__` of `colgov`,
-  `colgov.keys`, `colgov.pandas` and `colgov.spark`, including the
+  `colgov.keys`, `colgov.pandas`, `colgov.polars` and `colgov.spark`, including the
   signatures, keyword names and documented behaviour.
 - **The `colgov` command:** its subcommands, options, exit statuses
   (0 = success, 1 = error, 2 = usage error) and the CSV it reads and writes.
@@ -23,8 +23,11 @@ page defines what counts as the public API that promise covers. Before
 
 - Anything starting with `_`, and any module or name not listed above.
 - The wording of error messages. Rely on the exception type instead.
-- Which suggestions the built-in `core` rule pack makes. Its patterns
-  improve between minor releases.
+- Which suggestions the built-in rule packs (`core`, `sea`) make. Their
+  patterns and validators improve between minor releases.
+- The exact lines `colgov check` prints. Its exit status is public: 0 when
+  every column is reviewed, 1 when it isn't (or on warnings with
+  `--strict`).
 
 ## Changes after 1.0
 
