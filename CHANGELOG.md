@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 — unreleased
+## 1.1.0 — 2026-09-27
 
 New features, with no changes to the token format, file formats or
 existing APIs. Everything from 1.0 works unchanged.
