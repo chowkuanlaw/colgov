@@ -10,7 +10,7 @@ Tokenize a column and it stays joinable. Same plaintext, same token — every
 time, across tables and across runs — so `JOIN`, `GROUP BY` and
 `COUNT(DISTINCT)` keep working on data nobody can read.
 
-> **Status: stable (`1.0.0`).** The public API and file formats follow
+> **Status: stable (`1.1.0`).** The public API and file formats follow
 > Semantic Versioning: see the [stability policy](https://github.com/chowkuanlaw/colgov/blob/main/docs/stability.md).
 > The cryptographic design has not yet had an independent review. Read the
 > [threat model](https://github.com/chowkuanlaw/colgov/blob/main/docs/threat-model.md) before relying on it. See [CHANGELOG.md](https://github.com/chowkuanlaw/colgov/blob/main/CHANGELOG.md).
