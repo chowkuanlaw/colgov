@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.2.0 — 2026-10-22
+
 - Added an optional Presidio adapter for whole-value classification
   suggestions, with `--presidio` support in CLI classification and review.
 - Added ANSI SQL view generation over explicitly mapped pretokenized source
