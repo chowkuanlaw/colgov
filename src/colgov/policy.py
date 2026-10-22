@@ -258,7 +258,6 @@ class Policy:
         """
         _require_text(actor, "actor")
         _require_text(purpose, "purpose")
-        tokens = list(tokens)
         allowed, reason = self.may_detokenize(role, column, catalog, table=table)
         where = column if table is None else f"{table}.{column}"
 
@@ -279,6 +278,7 @@ class Policy:
         if not allowed or decision is None:
             log("denied", reason)
             raise AccessDenied(f"role {role!r} may not detokenize {where!r}: {reason}")
+        tokens = list(tokens)
         try:
             plaintext = [tokenizer.detokenize(t, column=decision.token_domain) for t in tokens]
         except InvalidToken as exc:

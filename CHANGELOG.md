@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+## 1.2.0 — 2026-10-22
+
+- Added an optional Presidio adapter for whole-value classification
+  suggestions, with `--presidio` support in CLI classification and review.
+- Added ANSI SQL view generation over explicitly mapped pretokenized source
+  columns. `colgov sql-view` emits SQL without accessing a warehouse.
+- Added `colgov report` for review coverage, role access and bounded
+  cardinality summaries of CSV and Parquet files.
+- Added reproducible, bounded reservoir sampling to CLI `classify` and
+  `review` for values appearing beyond the first rows.
+- CLI `apply` now records a `completed` audit event after output is written,
+  or an `error` event if writing fails. Its existing `allowed` event still
+  records authorization before data is released.
+- `colgov audit verify` prints the final hash and accepts externally saved
+  hash and count checkpoints to detect truncation or log replacement.
+- CLI `detokenize` now processes audited batches instead of loading the
+  entire input into memory. Denied requests are logged before a key is loaded
+  or input is read.
+- Catalog saves now replace files atomically and preserve existing file
+  permissions.
+
 ## 1.1.0 — 2026-09-27
 
 New features, with no changes to the token format, file formats or

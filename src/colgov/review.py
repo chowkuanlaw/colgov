@@ -24,6 +24,10 @@ request like any other change::
 
 from __future__ import annotations
 
+import contextlib
+import os
+import stat
+import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -204,8 +208,26 @@ class Catalog:
         return yaml.safe_dump(self.to_dict(), sort_keys=False, allow_unicode=True)
 
     def save(self, path: str | PathLike[str]) -> None:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(self.to_yaml())
+        payload = self.to_yaml()
+        destination = os.fspath(path)
+        directory = os.path.dirname(os.path.abspath(destination))
+        fd, temporary = tempfile.mkstemp(dir=directory, prefix=".colgov-catalog-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                mode = stat.S_IMODE(os.stat(destination).st_mode)
+            except FileNotFoundError:
+                mode = None
+            if mode is not None:
+                os.chmod(temporary, mode)
+            os.replace(temporary, destination)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
+            raise
 
     @classmethod
     def from_dict(cls, data: Any) -> Catalog:

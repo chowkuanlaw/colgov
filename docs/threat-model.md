@@ -33,7 +33,7 @@ It does this with three pieces:
 | Holds a role that isn't granted a label | That label's columns are left out of the role's view, detokenizing them raises `AccessDenied`, and the attempt is audited. |
 | Adds a new, unreviewed column upstream | The column is denied to every role until a person reviews it. |
 | Misspells a label or role in a policy or catalog | Fails closed: the affected columns are denied. |
-| Edits, deletes or reorders lines in a `JsonlAuditLog` | `verify_audit_log` reports the first broken line. |
+| Edits, deletes or reorders lines in a `JsonlAuditLog` | `verify_audit_log` reports a broken chain. An externally stored final hash and event count are needed to detect a rewritten or truncated chain. |
 
 ## Known limitations
 
@@ -61,10 +61,13 @@ These follow from the design. They are not bugs.
   detokenize without asking the policy and without leaving an audit record.
   The policy and audit log control people who use colgov, not people who
   hold keys.
-- **Truncating the end of the audit log goes undetected.** Hash chaining
+- **Truncating the end of the audit log goes undetected without a checkpoint.** Hash chaining
   catches edits, deletions and reordering inside the log, but not removal
-  of its last lines. Ship the log off the machine promptly, e.g. to a SIEM
-  or to storage with object lock, and compare event counts.
+  of its last lines. Someone who can rewrite the whole log can also compute
+  a new hash chain. Ship the log off the machine promptly, e.g. to a SIEM
+  or to storage with object lock, and keep its final hash and event count
+  there. Pass those values to `colgov audit verify --expected-hash` and
+  `--expected-count` when checking a local copy.
 - **Shared audit logs need file locking.** Several processes may append to
   one `JsonlAuditLog` on Linux and macOS, where each write takes an
   exclusive `flock`. Network filesystems may not honour `flock`, and
@@ -74,6 +77,10 @@ These follow from the design. They are not bugs.
   data, then remove the key.
 - **Spark ships the key.** `colgov.spark` sends the tokenizer, including its
   keys, to the executors. Use only clusters you trust with the key.
+- **Generated SQL views depend on warehouse permissions.** The source table
+  holds raw and pretokenized columns. `colgov sql-view` only selects columns;
+  it cannot validate token contents or block direct access to the source.
+  Restrict source permissions and keep token columns current.
 
 ## Your responsibilities
 

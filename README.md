@@ -238,6 +238,27 @@ pack = RulePack.combine(RulePack.builtin("core"), RulePack.builtin("sea"))
 
 On the command line, pass `--pack core,sea`.
 
+### Optional Presidio suggestions
+
+Install `colgov[presidio]` and configure Presidio's language model, then pass
+`--presidio` to `colgov classify` or `colgov review`. Presidio's detections
+are merged with rule-pack suggestions. A detection must span the entire
+sampled value; PII embedded in prose is outside this bridge's scope. The
+reviewer still makes every catalog decision.
+
+```bash
+pip install "colgov[presidio]"
+colgov classify customers.csv --pack core,sea --presidio
+colgov review customers.csv -c catalog.yaml --by alice --presidio
+```
+
+Python callers can pass a configured `AnalyzerEngine` (including custom
+recognizers) to `PresidioBridge(analyzer)`, then call `classify(table)` and
+pass a returned suggestion to `Catalog.accept`. By default, the bridge maps
+Presidio's `EMAIL_ADDRESS`, `PHONE_NUMBER`, `PERSON`, `CREDIT_CARD` and
+`IP_ADDRESS` entities to colgov labels. `entity_labels=` changes that map.
+Neither suggestions nor their evidence contain sampled values.
+
 ### Detokenization, with an audit trail
 
 Detokenizing is its own permission. It is granted per label with the long
@@ -275,9 +296,15 @@ policy.detokenize(tokens, column="customer_email", role="analyst", ...)
 - **The log is tamper-evident.** `JsonlAuditLog` chains every line to the
   one before it with SHA-256. `verify_audit_log("audit.jsonl")` (or
   `colgov audit verify`) finds any line that was edited, deleted or
-  reordered.
+  reordered. Save the final hash and event count outside the log, then pass
+  them to `colgov audit verify --expected-hash HASH --expected-count N` to
+  detect a truncated or entirely rewritten log.
 - **Views can be audited too.** Pass `audit=` and `actor=` to
   `policy.apply`.
+- **CLI views record authorization and completion separately.** `allowed`
+  means the view passed policy checks; `completed` means its output write
+  finished. A write failure gets an `error` event. Spark views are lazy, so
+  their `allowed` event only records authorization.
 
 ### Several tables in one catalog
 
@@ -350,6 +377,8 @@ colgov detokenize -p policy.yaml -c catalog.yaml --role support --column custome
                   --actor carol --purpose TICKET-4521 --audit audit.jsonl < tokens.txt
 colgov retokenize analyst.csv --columns customer_email -o migrated.csv
                                                 # after rotating keys
+colgov report customers.csv -c catalog.yaml -p policy.yaml --format json
+                                                # review coverage, access and cardinality
 colgov audit verify audit.jsonl
 ```
 
@@ -358,6 +387,18 @@ that table's catalog decisions.
 
 `review` shows suggestions and the evidence for them, but never the
 column's values.
+
+`classify` and `review` inspect the first 1000 rows by default. For a
+reproducible sample across the whole file, pass `--sample-strategy reservoir`
+and optionally `--sample-size` and `--sample-seed`. This scans the full file
+while keeping at most the requested number of non-null values per column in
+memory. Suggestions still require a person's review; sampling cannot prove
+that a column contains no PII.
+
+`detokenize` processes at most 1000 tokens per audited batch; use
+`--batch-size` to change that limit. Each batch has its own audit event. If a
+later batch contains a bad token, earlier batches may already have been
+printed, so treat stdout as a stream.
 
 **Parquet.** Every command that reads or writes data also takes Parquet.
 The format comes from the file name (`.parquet` or `.pq`), so `apply
@@ -394,6 +435,40 @@ colgov check target/catalog.json -c catalog.yaml -p policy.yaml   # every dbt mo
 - run: pip install "colgov[parquet]"
 - run: colgov check target/catalog.json -c governance/catalog.yaml --format github
 ```
+
+### Reporting on governance coverage
+
+`colgov report customers.csv -c catalog.yaml -p policy.yaml` summarizes
+reviewed and pending columns, stale decisions, and each role's view and
+detokenization grants. `--format json` produces machine-readable output.
+For reviewed, non-public string columns, it scans the full CSV or Parquet
+file and reports whether the column falls below `--min-distinct` (default:
+10). Distinct values are tracked only up to that threshold to bound memory;
+the report gives an exact count below the threshold and a lower bound above
+it. It never includes data values or tokens.
+
+### Generating a SQL view
+
+`colgov sql-view` emits an ANSI `CREATE VIEW` statement from a policy and
+catalog. The source table must already contain a separate token column for
+every logical column treated as `tokenize`; provide each pairing with
+`--token-column`. The generator refuses a tokenized treatment without one.
+Denied and unreviewed columns are omitted.
+
+```bash
+colgov sql-view customers.parquet -p policy.yaml -c catalog.yaml \
+  --role analyst --table customers \
+  --source warehouse.customers --view analytics.analyst_customers \
+  --token-column customer_email=customer_email_token > analyst_view.sql
+```
+
+The input file supplies the source table's column names, including token
+columns. Generate those columns with colgov using each catalog decision's
+token domain, and keep them in sync with the raw data. The view selects a
+token column under its logical name; it does not encrypt inside SQL. Check
+cardinality before producing tokens. Restrict direct access to the source
+table and grant access to the generated view with your warehouse's permission
+system. The command generates SQL but does not run it or grant permissions.
 
 ## Roadmap
 
@@ -436,17 +511,16 @@ colgov check target/catalog.json -c catalog.yaml -p policy.yaml   # every dbt mo
 **After 1.1**
 
 - [ ] Independent review of the cryptographic design
-- [ ] Optional Presidio bridge for value-shape detection
-- [ ] `colgov report`: a catalog and risk summary for auditors
-- [ ] SQL view generation for warehouses
+- [x] Optional Presidio bridge for whole-value suggestions
+- [x] `colgov report`: catalog coverage, role access and bounded cardinality summary
+- [x] ANSI SQL view generation over pretokenized companion columns
 
 ## Scope
 
 `colgov` governs **columns in tabular data**. It does not detect PII inside
 free-text prose — for that, use
-[Presidio](https://github.com/data-privacy-stack/presidio), which is excellent
-at it. An optional bridge is planned so Presidio can act as a value-shape
-detector feeding `colgov`'s classification.
+[Presidio](https://github.com/data-privacy-stack/presidio), which can also
+provide whole-value suggestions through the optional bridge above.
 
 ## Security
 

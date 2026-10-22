@@ -13,6 +13,9 @@
 ::: colgov.Suggestion
 ::: colgov.RulePackError
 
+::: colgov.PresidioBridge
+::: colgov.PresidioError
+
 ## Review
 
 ::: colgov.Catalog
@@ -35,6 +38,11 @@
 ::: colgov.ColumnRisk
 ::: colgov.KAnonymity
 ::: colgov.LowCardinalityError
+
+## SQL views
+
+::: colgov.generate_view_sql
+::: colgov.SqlViewError
 
 ## Audit
 

@@ -87,6 +87,81 @@ def test_classify_custom_pack(workdir, capsys):
     assert "gender: flag (0.50)" in out
 
 
+def test_classify_can_add_presidio_suggestions(workdir, capsys, monkeypatch):
+    from types import SimpleNamespace
+
+    from colgov import PresidioBridge
+
+    class FakeAnalyzer:
+        def analyze(self, *, text, language, entities):
+            if text.endswith("@example.com"):
+                return [SimpleNamespace(entity_type="EMAIL_ADDRESS", start=0, end=len(text), score=0.9)]
+            return []
+
+    monkeypatch.setattr("colgov.cli.PresidioBridge.create", lambda **kwargs: PresidioBridge(FakeAnalyzer()))
+    code, out, _ = run(capsys, "classify", "data.csv", "--presidio")
+    assert code == 0
+    assert "email-name, email-value, presidio:EMAIL_ADDRESS" in out
+    assert "user0@example.com" not in out
+
+
+def test_review_can_accept_presidio_only_suggestion(tmp_path, monkeypatch):
+    import argparse
+    import io
+    from types import SimpleNamespace
+
+    from colgov import PresidioBridge
+
+    class FakeAnalyzer:
+        def analyze(self, *, text, language, entities):
+            return [SimpleNamespace(entity_type="EMAIL_ADDRESS", start=0, end=len(text), score=0.9)]
+
+    monkeypatch.setattr("colgov.cli.PresidioBridge.create", lambda **kwargs: PresidioBridge(FakeAnalyzer()))
+    (tmp_path / "data.csv").write_text("contact\nperson@example.com\n")
+    (tmp_path / "pack.yaml").write_text(
+        "pack: custom\nversion: 1\nlabels: {email: {}}\nrules:\n"
+        "  - {id: never, label: email, column_name: '^never$', confidence: 0.5}\n"
+    )
+    args = argparse.Namespace(
+        data=str(tmp_path / "data.csv"),
+        catalog=str(tmp_path / "catalog.yaml"),
+        by="alice",
+        pack=str(tmp_path / "pack.yaml"),
+        sample_size=1000,
+        table=None,
+        presidio=True,
+        presidio_language="en",
+    )
+    out = io.StringIO()
+    assert cmd_review(args, ask=lambda _: "1", out=out) == 0
+    decision = Catalog.load(args.catalog).get("contact")
+    assert decision is not None and decision.label == "email"
+    assert decision.rule_ids == ("presidio:EMAIL_ADDRESS",)
+    assert "person@example.com" not in out.getvalue()
+
+
+def test_sql_view_cli_requires_pretokenized_column(workdir, capsys):
+    (workdir / "schema.csv").write_text("customer_email,customer_email_token,gender,comments\n")
+    argv = (
+        "sql-view",
+        "schema.csv",
+        *POLICY_ARGS,
+        "--role",
+        "analyst",
+        "--source",
+        "raw.customers",
+        "--view",
+        "governed.analyst_customers",
+    )
+    code, out, err = run(capsys, *argv)
+    assert code == 1 and out == "" and "needs a pretokenized" in err
+    code, out, _ = run(capsys, *argv, "--token-column", "customer_email=customer_email_token")
+    assert code == 0
+    assert '"customer_email_token" AS "customer_email"' in out
+    assert '"gender"' in out and '"comments"' not in out
+    assert 'FROM "raw"."customers";' in out
+
+
 def test_plan(workdir, capsys):
     code, out, _ = run(capsys, "plan", "data.csv", *POLICY_ARGS, "--role", "analyst")
     assert code == 0
@@ -114,9 +189,10 @@ def test_apply_to_stdout_with_audit(workdir, capsys):
     )
     assert code == 0
     assert out.splitlines()[1] == "user0@example.com,M"
-    assert verify_audit_log("audit.jsonl") == 1
-    event = json.loads(open("audit.jsonl").readline())
-    assert (event["action"], event["actor"], event["count"]) == ("view", "carol", 20)
+    assert verify_audit_log("audit.jsonl") == 2
+    events = [json.loads(line) for line in open("audit.jsonl")]
+    assert [event["outcome"] for event in events] == ["allowed", "completed"]
+    assert (events[1]["action"], events[1]["actor"], events[1]["count"]) == ("view", "carol", 20)
 
 
 def test_apply_empty_cells_stay_empty(workdir, capsys):
@@ -221,12 +297,35 @@ def test_detokenize_from_stdin(workdir, capsys, monkeypatch):
     assert code == 0 and out.splitlines()[0] == "user0@example.com"
 
 
+def test_detokenize_audits_bounded_batches(workdir, capsys):
+    tokenizer = Tokenizer(KEY)
+    (workdir / "tokens.txt").write_text(
+        "\n".join(tokenizer.tokenize(f"user{i}@example.com", column="customer_email") for i in range(5)) + "\n"
+    )
+    code, out, _ = run(
+        capsys, "detokenize", *POLICY_ARGS, "--role", "support", *DETOK, "--batch-size", "2", "tokens.txt"
+    )
+    assert code == 0
+    assert out.splitlines() == [f"user{i}@example.com" for i in range(5)]
+    events = [json.loads(line) for line in open("audit.jsonl")]
+    assert [event["count"] for event in events] == [2, 2, 1]
+    assert verify_audit_log("audit.jsonl") == 3
+
+
 def test_detokenize_denied(workdir, capsys):
     _tokens_file(workdir)
     code, out, err = run(capsys, "detokenize", *POLICY_ARGS, "--role", "analyst", *DETOK, "tokens.txt")
     assert code == 1
     assert out == ""
     assert "may not detokenize" in err
+    assert json.loads(open("audit.jsonl").readline())["outcome"] == "denied"
+
+
+def test_detokenize_denied_before_key_or_input(workdir, capsys, monkeypatch):
+    monkeypatch.delenv(KEY_ENV)
+    code, out, err = run(capsys, "detokenize", *POLICY_ARGS, "--role", "analyst", *DETOK, "missing.txt")
+    assert code == 1 and out == ""
+    assert "may not detokenize" in err and "no master key" not in err
     assert json.loads(open("audit.jsonl").readline())["outcome"] == "denied"
 
 
@@ -246,6 +345,23 @@ def test_audit_verify(workdir, capsys):
     open("audit.jsonl", "w").write(text)
     code, _, err = run(capsys, "audit", "verify", "audit.jsonl")
     assert code == 1 and "hash mismatch" in err
+
+
+def test_audit_verify_detects_truncation_with_external_checkpoint(workdir, capsys):
+    _tokens_file(workdir)
+    run(capsys, "detokenize", *POLICY_ARGS, "--role", "support", *DETOK, "tokens.txt")
+    run(capsys, "detokenize", *POLICY_ARGS, "--role", "support", *DETOK, "tokens.txt")
+    lines = (workdir / "audit.jsonl").read_text().splitlines(keepends=True)
+    expected_hash = json.loads(lines[-1])["hash"]
+    code, out, _ = run(
+        capsys, "audit", "verify", "audit.jsonl", "--expected-count", "2", "--expected-hash", expected_hash
+    )
+    assert code == 0 and expected_hash in out
+    (workdir / "audit.jsonl").write_text(lines[0])
+    code, _, err = run(capsys, "audit", "verify", "audit.jsonl", "--expected-count", "2")
+    assert code == 1 and "does not match expected count" in err
+    code, _, err = run(capsys, "audit", "verify", "audit.jsonl", "--expected-hash", expected_hash)
+    assert code == 1 and "does not match expected hash" in err
 
 
 # --- review -------------------------------------------------------------------------
@@ -455,6 +571,36 @@ def test_apply_audit_counts_rows_before_output(workdir, capsys):
     )
     event = json.loads(open("audit.jsonl").readline())
     assert (code, event["outcome"], event["count"]) == (0, "allowed", 20)
+    events = [json.loads(line) for line in open("audit.jsonl")]
+    assert [(event["outcome"], event["count"]) for event in events] == [("allowed", 20), ("completed", 20)]
+
+
+def test_apply_audit_records_output_failure(workdir, capsys, monkeypatch):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fail_sink(*args, **kwargs):
+        raise OSError("write failed")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("colgov.cli.open_sink", fail_sink)
+    code, _, err = run(
+        capsys,
+        "apply",
+        "data.csv",
+        *POLICY_ARGS,
+        "--role",
+        "analyst",
+        "-o",
+        "out.csv",
+        "--audit",
+        "audit.jsonl",
+        "--actor",
+        "bob",
+    )
+    assert code == 1 and "write failed" in err
+    events = [json.loads(line) for line in open("audit.jsonl")]
+    assert [event["outcome"] for event in events] == ["allowed", "error"]
 
 
 def test_classify_reads_only_the_sample(workdir, capsys):
@@ -464,6 +610,32 @@ def test_classify_reads_only_the_sample(workdir, capsys):
     assert code == 0 and "customer_email: email" in out
     code, _, err = run(capsys, "classify", "data.csv")
     assert code == 1 and "expected 4 fields" in err
+
+
+def test_reservoir_sampling_finds_values_beyond_first_rows(tmp_path, capsys):
+    from colgov.cli import _read_sample
+
+    data = tmp_path / "mixed.csv"
+    data.write_text("mystery\n" + "plain\n" * 8 + "person@example.com\n" * 200)
+    pack = tmp_path / "email.yaml"
+    pack.write_text(
+        "pack: sample\nversion: 1\nlabels: {email: {}}\nrules:\n"
+        "  - {id: email-value, label: email, value_pattern: '[^@]+@[^@]+', confidence: 0.9}\n"
+    )
+    argv = ("classify", str(data), "--pack", str(pack), "--sample-size", "8")
+    assert "(no suggestion)" in run(capsys, *argv)[1]
+    code, out, _ = run(capsys, *argv, "--sample-strategy", "reservoir", "--sample-seed", "7")
+    assert code == 0 and "mystery: email" in out
+    assert _read_sample(str(data), 8, "reservoir", 7) == _read_sample(str(data), 8, "reservoir", 7)
+
+
+def test_reservoir_scans_full_file_and_rejects_invalid_sample_size(workdir, capsys):
+    with open("data.csv", "a", newline="") as f:
+        f.write("broken,row\n")
+    code, _, err = run(capsys, "classify", "data.csv", "--sample-size", "5", "--sample-strategy", "reservoir")
+    assert code == 1 and "expected 4 fields" in err
+    code, _, err = run(capsys, "classify", "data.csv", "--sample-size", "0")
+    assert code == 1 and "--sample-size must be positive" in err
 
 
 def test_cardinality_scan_is_exact_for_refused_columns(tmp_path):
@@ -502,6 +674,43 @@ def test_classify_with_combined_packs(tmp_path, monkeypatch, capsys):
 
 
 # --- check ------------------------------------------------------------------------
+
+
+def test_report_summarizes_catalog_policy_and_risk(workdir, capsys):
+    code, out, _ = run(capsys, "report", "data.csv", "-c", "catalog.yaml", "-p", "policy.yaml", "--format", "json")
+    assert code == 0
+    report = json.loads(out)
+    assert (report["rows"], report["reviewed"], report["pending"]) == (20, 3, 1)
+    columns = {entry["column"]: entry for entry in report["columns"]}
+    assert columns["customer_email"]["risk"] == {
+        "non_null": 20,
+        "distinct": None,
+        "distinct_at_least": 10,
+        "low_cardinality": False,
+    }
+    assert columns["mobile_no"]["risk"]["low_cardinality"] is False
+    assert columns["customer_email"]["roles"]["analyst"] == {"view": "tokenize", "detokenize": False}
+    assert columns["customer_email"]["roles"]["support"] == {"view": "clear", "detokenize": True}
+    assert columns["comments"]["reviewed"] is False
+    assert "user0@example.com" not in out
+
+
+def test_report_flags_low_cardinality_and_stale_decisions(workdir, capsys):
+    catalog = Catalog.load("catalog.yaml")
+    catalog.decide("comments", "email", by="alice")
+    catalog.decide("old_column", "email", by="alice")
+    catalog.save("catalog.yaml")
+    code, out, _ = run(capsys, "report", "data.csv", "-c", "catalog.yaml", "--format", "json")
+    assert code == 0
+    report = json.loads(out)
+    comments = next(entry for entry in report["columns"] if entry["column"] == "comments")
+    assert comments["risk"] == {
+        "non_null": 7,
+        "distinct": 1,
+        "distinct_at_least": 1,
+        "low_cardinality": True,
+    }
+    assert report["stale"] == ["old_column"]
 
 
 def test_check_passes_when_every_column_is_reviewed(workdir, capsys):
@@ -644,6 +853,16 @@ def parquet_workdir(workdir):
     cat.decide("age", "public", by="alice")
     cat.save("catalog.yaml")
     return workdir
+
+
+def test_report_parquet_handles_nulls_and_numeric_columns(parquet_workdir, capsys):
+    code, out, _ = run(capsys, "report", "data.parquet", "-c", "catalog.yaml", "--format", "json")
+    assert code == 0
+    report = json.loads(out)
+    columns = {entry["column"]: entry for entry in report["columns"]}
+    assert report["rows"] == 20
+    assert columns["customer_email"]["risk"]["non_null"] == 19
+    assert "risk" not in columns["age"]
 
 
 def test_apply_parquet_to_parquet_keeps_types(parquet_workdir, capsys):
