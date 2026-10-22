@@ -1,8 +1,9 @@
 # Releasing
 
-Releases go to PyPI automatically when a version tag is pushed. The
-`Release` workflow uses PyPI trusted publishing, so no API token is stored
-in the repository.
+Releases go to PyPI and GitHub automatically when a version tag is pushed.
+The `Release` workflow uses PyPI trusted publishing, so no PyPI API token is
+stored in the repository. It creates the GitHub Release after PyPI publishing
+succeeds and attaches the built wheel and source distribution.
 
 ## One-time setup
 
@@ -30,8 +31,8 @@ in the repository.
    ```
 
 3. The workflow checks that the tag matches the package version, runs the
-   tests, builds the package and publishes it. If the tag and the version
-   don't match, nothing is published.
+   tests, builds the package, publishes it to PyPI and creates a GitHub
+   Release. If the tag and the version don't match, nothing is published.
 
 ## Release candidates
 
