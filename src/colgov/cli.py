@@ -550,7 +550,7 @@ def _read_sample(
     samples: dict[str, list[Any]] = {column: [] for column in source.header}
     seen = dict.fromkeys(source.header, 0)
     # Reproducible suggestions only; sampling never grants access or weakens policy checks.
-    generators = {column: random.Random(seed + index) for index, column in enumerate(source.header)}  # noqa: S311
+    generators = {column: random.Random(seed + index) for index, column in enumerate(source.header)}  # noqa: S311  # nosec B311
     for _, row in source.rows():
         for column, value in zip(source.header, row, strict=True):
             if value is None:
