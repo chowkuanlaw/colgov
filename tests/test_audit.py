@@ -203,6 +203,18 @@ def test_detokenize_denied_and_audited(role, column, reason):
     assert event.count == 0
 
 
+def test_detokenize_denial_does_not_consume_input():
+    audit = MemoryAuditLog()
+
+    def forbidden_input():
+        raise AssertionError("input was consumed")
+        yield "token"  # pragma: no cover
+
+    with pytest.raises(AccessDenied):
+        _detok(forbidden_input(), role="analyst", audit=audit)
+    assert [event.outcome for event in audit.events] == ["denied"]
+
+
 def test_access_denied_is_a_policy_error():
     assert issubclass(AccessDenied, PolicyError)
 

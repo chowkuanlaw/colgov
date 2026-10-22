@@ -16,6 +16,7 @@ from colgov.audit import (
 )
 from colgov.keys import KeySpecError, load_key, load_keyring
 from colgov.policy import AccessDenied, Grant, Policy, PolicyError, Resolution, Treatment
+from colgov.presidio import PresidioBridge, PresidioError
 from colgov.review import Catalog, CatalogError, Decision
 from colgov.risk import (
     DEFAULT_MIN_DISTINCT,
@@ -26,6 +27,7 @@ from colgov.risk import (
     k_anonymity,
 )
 from colgov.rules import PUBLIC, Label, Rule, RulePack, RulePackError, Suggestion
+from colgov.sql import SqlViewError, generate_view_sql
 from colgov.tokenization import MIN_MASTER_KEY_BYTES, InvalidToken, Keyring, Tokenizer
 
 __version__ = "1.1.0"
@@ -54,15 +56,19 @@ __all__ = [
     "MultiAuditLog",
     "Policy",
     "PolicyError",
+    "PresidioBridge",
+    "PresidioError",
     "Resolution",
     "Rule",
     "RulePack",
     "RulePackError",
+    "SqlViewError",
     "Suggestion",
     "Tokenizer",
     "Treatment",
     "__version__",
     "column_risk",
+    "generate_view_sql",
     "k_anonymity",
     "load_key",
     "load_keyring",

@@ -188,6 +188,24 @@ def test_yaml_round_trip_with_tables(tmp_path):
     assert sorted(loaded, key=order) == sorted(cat, key=order)
 
 
+def test_save_keeps_previous_catalog_if_replace_fails(tmp_path, monkeypatch):
+    cat = Catalog()
+    cat.decide("email", "email", by="alice", at=AT)
+    path = tmp_path / "catalog.yaml"
+    cat.save(path)
+    original = path.read_bytes()
+    cat.decide("other", PUBLIC, by="alice", at=AT)
+
+    def fail_replace(*args):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("colgov.review.os.replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        cat.save(path)
+    assert path.read_bytes() == original
+    assert not list(tmp_path.glob(".colgov-catalog-*"))
+
+
 def test_tables_only_catalog_omits_columns_key():
     cat = Catalog()
     cat.decide("email", "email", by="a", table="t", at=AT)

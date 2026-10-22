@@ -9,7 +9,9 @@ why and how many values.
 
 :class:`JsonlAuditLog` writes one JSON object per line and chains each
 record to the previous one with SHA-256. Editing, deleting or reordering an
-earlier line breaks the chain, which :func:`verify_audit_log` detects.
+earlier line breaks the chain, which :func:`verify_audit_log` detects unless
+the chain is recomputed. Store the final hash outside the log to detect a
+rewritten or truncated chain.
 :class:`LoggingAuditLog` forwards events to Python ``logging`` (and from
 there to syslog, a SIEM, ...), and :class:`MultiAuditLog` writes to several
 logs at once.
@@ -47,7 +49,11 @@ class AuditLogError(ValueError):
 
 @dataclass(frozen=True)
 class AuditEvent:
-    """One access attempt. ``outcome`` is ``allowed``, ``denied`` or ``error``."""
+    """One access event. ``outcome`` is ``allowed``, ``completed``, ``denied`` or ``error``.
+
+    CLI views record ``allowed`` before writing and ``completed`` after the
+    output is written. Lazy Spark views only record authorization.
+    """
 
     actor: str
     role: str

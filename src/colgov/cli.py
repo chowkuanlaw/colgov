@@ -14,6 +14,8 @@
     colgov retokenize data.csv --columns a,b -o out.csv
                                            re-issue tokens under the primary key
     colgov check data.csv -c catalog.yaml  fail if any column hasn't been reviewed
+    colgov report data.csv -c catalog.yaml summarize reviews, access and risk
+    colgov sql-view data.csv -p ... -c ...  generate a warehouse view
     colgov audit verify audit.jsonl        check an audit log's hash chain
 
 Data files are CSV, or Parquet when the name ends in ``.parquet`` or
@@ -33,8 +35,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import itertools
 import json
 import os
+import random
 import sys
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -43,12 +48,14 @@ from typing import Any, TextIO
 
 import colgov
 from colgov._tabular import Row, Source, TabularError, open_sink, open_source
-from colgov.audit import AuditLogError, JsonlAuditLog, verify_audit_log
+from colgov.audit import AuditLogError, JsonlAuditLog, _last_hash, record_event, verify_audit_log
 from colgov.keys import KeySpecError, generate_aws_kms_key, load_keyring
-from colgov.policy import Policy, PolicyError, Treatment, record_view, summarize
+from colgov.policy import AccessDenied, Policy, PolicyError, Treatment, record_view, summarize
+from colgov.presidio import PresidioBridge, PresidioError
 from colgov.review import Catalog, CatalogError
-from colgov.risk import ColumnRisk, LowCardinalityError
-from colgov.rules import PUBLIC, RulePack, RulePackError
+from colgov.risk import DEFAULT_MIN_DISTINCT, ColumnRisk, LowCardinalityError
+from colgov.rules import PUBLIC, RulePack, RulePackError, Suggestion
+from colgov.sql import SqlViewError, generate_view_sql
 from colgov.tokenization import InvalidToken, Tokenizer
 
 KEY_ENV = "COLGOV_MASTER_KEY"
@@ -61,7 +68,9 @@ _ERRORS = (
     LowCardinalityError,
     OSError,
     PolicyError,
+    PresidioError,
     RulePackError,
+    SqlViewError,
     TabularError,
     UnicodeDecodeError,
 )
@@ -103,8 +112,10 @@ def cmd_keygen(args: argparse.Namespace) -> int:
 
 
 def cmd_classify(args: argparse.Namespace) -> int:
-    header, data = _read_sample(args.data, args.sample_size)
-    suggestions = _pack(args.pack).classify(data, sample_size=args.sample_size)
+    header, data = _read_sample(
+        args.data, args.sample_size, getattr(args, "sample_strategy", "head"), getattr(args, "sample_seed", 0)
+    )
+    suggestions = _classify_with_bridge(_pack(args.pack), data, args)
     for column in header:
         found = suggestions[column]
         if not found:
@@ -125,14 +136,16 @@ def cmd_review(
     if not args.by.strip():
         raise CliError("--by must name the reviewer")
     pack = _pack(args.pack)
-    header, data = _read_sample(args.data, args.sample_size)
+    header, data = _read_sample(
+        args.data, args.sample_size, getattr(args, "sample_strategy", "head"), getattr(args, "sample_seed", 0)
+    )
     catalog = Catalog.load(args.catalog) if os.path.exists(args.catalog) else Catalog()
     pending = catalog.pending(header, table=args.table)
     if not pending:
         print("Every column has a decision. Nothing to review.", file=out)
         return 0
-    suggestions = pack.classify({c: data[c] for c in pending}, sample_size=args.sample_size)
-    labels = sorted(pack.labels)
+    suggestions = _classify_with_bridge(pack, {c: data[c] for c in pending}, args)
+    labels = sorted(set(pack.labels) | {s.label for found in suggestions.values() for s in found})
 
     decided = 0
     for n, column in enumerate(pending, start=1):
@@ -213,15 +226,22 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
     visible = [(header.index(r.column), r) for r in plan if r.treatment is not Treatment.DENY]
     types = {r.column: None if r.treatment is Treatment.TOKENIZE else source.arrow_type(r.column) for _, r in visible}
-    with open_sink(args.output, [r.column for _, r in visible], types) as write:
-        for _, row in source.rows():
-            out_row: Row = []
-            for i, r in visible:
-                value = row[i]
-                if r.treatment is Treatment.TOKENIZE and value is not None:
-                    value = tokenizer.tokenize(value, column=r.domain or r.column)  # type: ignore[union-attr]
-                out_row.append(value)
-            write(out_row)
+    try:
+        with open_sink(args.output, [r.column for _, r in visible], types) as write:
+            for _, row in source.rows():
+                out_row: Row = []
+                for i, r in visible:
+                    value = row[i]
+                    if r.treatment is Treatment.TOKENIZE and value is not None:
+                        value = tokenizer.tokenize(value, column=r.domain or r.column)  # type: ignore[union-attr]
+                    out_row.append(value)
+                write(out_row)
+    except Exception as exc:
+        if audit is not None:
+            record_view(audit, args.actor, args.role, plan, "error", f"output failed: {exc}", 0)
+        raise
+    if audit is not None:
+        record_view(audit, args.actor, args.role, plan, "completed", summarize(plan), n_rows)
     denied = [r.column for r in plan if r.treatment is Treatment.DENY]
     if denied:
         print(f"colgov: left out {len(denied)} column(s): {', '.join(denied)}", file=sys.stderr)
@@ -230,24 +250,44 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
 def cmd_detokenize(args: argparse.Namespace) -> int:
     policy, catalog = Policy.load(args.policy), Catalog.load(args.catalog)
-    if args.tokens == "-":
-        tokens = [line.strip() or None for line in sys.stdin]
-    else:
-        with open(args.tokens, encoding="utf-8") as f:
-            tokens = [line.strip() or None for line in f]
-    plaintext = policy.detokenize(
-        tokens,
+    if args.batch_size < 1:
+        raise CliError("--batch-size must be positive")
+    audit = JsonlAuditLog(args.audit)
+    allowed, reason = policy.may_detokenize(args.role, args.column, catalog, table=args.table)
+    if not allowed:
+        where = args.column if args.table is None else f"{args.table}.{args.column}"
+        record_event(
+            audit,
+            actor=args.actor,
+            role=args.role,
+            action="detokenize",
+            outcome="denied",
+            columns=[where],
+            reason=reason,
+            purpose=args.purpose,
+        )
+        raise AccessDenied(f"role {args.role!r} may not detokenize {where!r}: {reason}")
+    tokenizer = _tokenizer(args)
+    kwargs = dict(
         column=args.column,
         table=args.table,
         role=args.role,
         catalog=catalog,
-        tokenizer=_tokenizer(args),
+        tokenizer=tokenizer,
         actor=args.actor,
         purpose=args.purpose,
-        audit=JsonlAuditLog(args.audit),
+        audit=audit,
     )
-    for value in plaintext:
-        print("" if value is None else value)
+    with contextlib.ExitStack() as stack:
+        lines = sys.stdin if args.tokens == "-" else stack.enter_context(open(args.tokens, encoding="utf-8"))
+        tokens = (line.strip() or None for line in lines)
+        seen = False
+        while batch := list(itertools.islice(tokens, args.batch_size)):
+            seen = True
+            for value in policy.detokenize(batch, **kwargs):
+                print("" if value is None else value)
+        if not seen:
+            policy.detokenize((), **kwargs)
     return 0
 
 
@@ -338,9 +378,125 @@ def cmd_check(args: argparse.Namespace, out: TextIO | None = None) -> int:
     return 1 if errors or (args.strict and warnings) else 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    """Summarize reviewed columns, role access, and bounded cardinality risk."""
+    if args.min_distinct < 1:
+        raise CliError("--min-distinct must be positive")
+    source = open_source(args.data)
+    catalog = Catalog.load(args.catalog)
+    policy = Policy.load(args.policy) if args.policy else None
+    profiled = [
+        column
+        for column in source.header
+        if (decision := catalog.get(column, table=args.table)) is not None
+        and decision.label != PUBLIC
+        and source.is_string(column)
+    ]
+    counts: dict[str, Counter[str]] = {column: Counter() for column in profiled}
+    nulls = dict.fromkeys(profiled, 0)
+    open_columns = set(profiled)
+    n_rows = 0
+    for _, row in source.rows(profiled):
+        n_rows += 1
+        for column, value in zip(profiled, row, strict=True):
+            if value is None:
+                nulls[column] += 1
+            elif column in open_columns:
+                counts[column][value] += 1
+                if len(counts[column]) >= args.min_distinct:
+                    open_columns.remove(column)
+    columns: list[dict[str, Any]] = []
+    for column in source.header:
+        decision = catalog.get(column, table=args.table)
+        entry: dict[str, Any] = {"column": column, "reviewed": decision is not None}
+        if decision is not None:
+            entry.update(
+                label=decision.label,
+                decided_by=decision.decided_by,
+                decided_at=decision.decided_at.isoformat(),
+                domain=decision.token_domain,
+            )
+        if column in counts:
+            distinct = len(counts[column])
+            entry["risk"] = {
+                "non_null": n_rows - nulls[column],
+                "distinct": distinct if column in open_columns else None,
+                "distinct_at_least": distinct,
+                "low_cardinality": bool(n_rows - nulls[column] and column in open_columns),
+            }
+        if policy is not None:
+            entry["roles"] = {
+                role: {
+                    "view": policy.resolve(role, column, catalog, table=args.table).treatment.value,
+                    "detokenize": policy.may_detokenize(role, column, catalog, table=args.table)[0],
+                }
+                for role in policy.roles
+            }
+        columns.append(entry)
+    present = set(source.header)
+    report = {
+        "table": args.table,
+        "rows": n_rows,
+        "min_distinct": args.min_distinct,
+        "reviewed": sum(entry["reviewed"] for entry in columns),
+        "pending": sum(not entry["reviewed"] for entry in columns),
+        "stale": sorted(d.column for d in catalog if d.table == args.table and d.column not in present),
+        "columns": columns,
+    }
+    if args.format == "json":
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"{args.table or args.data}: {n_rows} rows, {report['reviewed']} reviewed, {report['pending']} pending")
+        for entry in columns:
+            label = entry.get("label", "PENDING")
+            risk = entry.get("risk")
+            cardinality = ""
+            if risk is not None:
+                distinct_text = str(risk["distinct"]) if risk["distinct"] is not None else f">={args.min_distinct}"
+                cardinality = f"; distinct={distinct_text}; low_cardinality={risk['low_cardinality']}"
+            print(f"  {entry['column']}: {label}{cardinality}")
+            for role, grant in entry.get("roles", {}).items():
+                print(f"    {role}: {grant['view']}; detokenize={grant['detokenize']}")
+        if report["stale"]:
+            print(f"  stale decisions: {', '.join(report['stale'])}")
+    return 0
+
+
+def cmd_sql_view(args: argparse.Namespace) -> int:
+    source = open_source(args.data)
+    mappings: dict[str, str] = {}
+    for spec in args.token_column:
+        logical, separator, token = spec.partition("=")
+        if not separator or not logical or not token:
+            raise CliError("--token-column must be LOGICAL=TOKEN_COLUMN")
+        if logical in mappings:
+            raise CliError(f"--token-column repeats {logical!r}")
+        mappings[logical] = token
+    for token in mappings.values():
+        if token in source.header and not source.is_string(token):
+            raise CliError(f"token column {token!r} must be a string")
+    sql = generate_view_sql(
+        Policy.load(args.policy),
+        Catalog.load(args.catalog),
+        role=args.role,
+        columns=source.header,
+        source=args.source,
+        view=args.view,
+        token_columns=mappings,
+        table=args.table,
+    )
+    print(sql)
+    return 0
+
+
 def cmd_audit_verify(args: argparse.Namespace) -> int:
     count = verify_audit_log(args.log)
-    print(f"OK: {count} event(s), hash chain intact")
+    last_hash = _last_hash(args.log)
+    if args.expected_count is not None and count != args.expected_count:
+        raise CliError(f"audit event count {count} does not match expected count {args.expected_count}")
+    if args.expected_hash is not None and last_hash != args.expected_hash.lower():
+        raise CliError(f"audit final hash {last_hash} does not match expected hash {args.expected_hash}")
+    print(f"OK: {count} event(s), hash chain intact; final hash {last_hash}")
     return 0
 
 
@@ -355,9 +511,59 @@ def _pack(spec: str) -> RulePack:
     return RulePack.combine(*(RulePack.load(p) if os.path.exists(p) else RulePack.builtin(p) for p in parts))
 
 
-def _read_sample(path: str, limit: int) -> tuple[list[str], dict[str, list[Any]]]:
+def _classify_with_bridge(
+    pack: RulePack, data: dict[str, list[Any]], args: argparse.Namespace
+) -> dict[str, list[Suggestion]]:
+    suggestions = pack.classify(data, sample_size=args.sample_size)
+    if not getattr(args, "presidio", False):
+        return suggestions
+    bridge = PresidioBridge.create(language=getattr(args, "presidio_language", "en"))
+    extra = bridge.classify(data, sample_size=args.sample_size)
+    for column, found in suggestions.items():
+        by_label = {suggestion.label: suggestion for suggestion in found}
+        for suggestion in extra[column]:
+            previous = by_label.get(suggestion.label)
+            if previous is None:
+                by_label[suggestion.label] = suggestion
+            else:
+                by_label[suggestion.label] = Suggestion(
+                    column=column,
+                    label=suggestion.label,
+                    confidence=max(previous.confidence, suggestion.confidence),
+                    rule_ids=(*previous.rule_ids, *suggestion.rule_ids),
+                    evidence=(*previous.evidence, *suggestion.evidence),
+                )
+        suggestions[column] = sorted(by_label.values(), key=lambda item: (-item.confidence, item.label))
+    return suggestions
+
+
+def _read_sample(
+    path: str, limit: int, strategy: str = "head", seed: int = 0
+) -> tuple[list[str], dict[str, list[Any]]]:
+    if limit < 1:
+        raise CliError("--sample-size must be positive")
     source = open_source(path)
-    return source.header, source.sample(limit)
+    if strategy == "head":
+        return source.header, source.sample(limit)
+    if strategy != "reservoir":
+        raise CliError(f"unknown sample strategy {strategy!r}")
+    samples: dict[str, list[Any]] = {column: [] for column in source.header}
+    seen = dict.fromkeys(source.header, 0)
+    # Reproducible suggestions only; sampling never grants access or weakens policy checks.
+    generators = {column: random.Random(seed + index) for index, column in enumerate(source.header)}  # noqa: S311
+    for _, row in source.rows():
+        for column, value in zip(source.header, row, strict=True):
+            if value is None:
+                continue
+            seen[column] += 1
+            sample = samples[column]
+            if len(sample) < limit:
+                sample.append(value)
+            else:
+                position = generators[column].randrange(seen[column])
+                if position < limit:
+                    sample[position] = value
+    return source.header, samples
 
 
 def _require_strings(source: Source, columns: Sequence[str]) -> None:
@@ -478,6 +684,17 @@ def _parser() -> argparse.ArgumentParser:
             help="built-in pack names or YAML pack paths, comma-separated, e.g. core,sea (default: core)",
         )
         p.add_argument("--sample-size", type=int, default=1000, help="values sampled per column (default: 1000)")
+        p.add_argument(
+            "--sample-strategy",
+            choices=["head", "reservoir"],
+            default="head",
+            help="head reads the first rows; reservoir scans the full file (default: head)",
+        )
+        p.add_argument(
+            "--sample-seed", type=int, default=0, help="reproducible seed for reservoir sampling (default: 0)"
+        )
+        p.add_argument("--presidio", action="store_true", help="add Presidio whole-value suggestions (optional extra)")
+        p.add_argument("--presidio-language", default="en", help="Presidio analyzer language (default: en)")
 
     def policy_args(p: argparse.ArgumentParser) -> None:
         p.add_argument("-p", "--policy", required=True, help="policy YAML file")
@@ -532,6 +749,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--actor", required=True, help="who is asking")
     p.add_argument("--purpose", required=True, help="why, e.g. a ticket number")
     p.add_argument("--audit", required=True, help="JSONL audit log to append to")
+    p.add_argument("--batch-size", type=int, default=1000, help="tokens per audited batch (default: 1000)")
     p.add_argument("tokens", nargs="?", default="-", help="file with one token per line (default: stdin)")
 
     p = add("retokenize", cmd_retokenize, "re-issue tokens in a data file under the primary key (after rotating keys)")
@@ -560,10 +778,34 @@ def _parser() -> argparse.ArgumentParser:
         help="github: annotations for GitHub Actions (default: text)",
     )
 
+    p = add("report", cmd_report, "summarize catalog coverage, role access and column cardinality")
+    p.add_argument("data", help="CSV or Parquet data file")
+    p.add_argument("-c", "--catalog", required=True, help="catalog YAML file")
+    p.add_argument("-p", "--policy", help="policy YAML file: include each role's access")
+    table_arg(p)
+    p.add_argument("--min-distinct", type=int, default=DEFAULT_MIN_DISTINCT, help="cardinality threshold (default: 10)")
+    p.add_argument("--format", choices=["text", "json"], default="text")
+
+    p = add("sql-view", cmd_sql_view, "generate an ANSI SQL view over raw and pretokenized columns")
+    p.add_argument("data", help="CSV or Parquet file with the source table's column names")
+    policy_args(p)
+    table_arg(p)
+    p.add_argument("--source", required=True, help="qualified source table name")
+    p.add_argument("--view", required=True, help="qualified view name")
+    p.add_argument(
+        "--token-column",
+        action="append",
+        default=[],
+        metavar="LOGICAL=TOKEN_COLUMN",
+        help="pretokenized source column for a logical column; repeat as needed",
+    )
+
     audit = sub.add_parser("audit", help="audit log tools", description="audit log tools")
     audit_sub = audit.add_subparsers(dest="audit_command", required=True, metavar="COMMAND")
     p = audit_sub.add_parser("verify", help="check an audit log's hash chain")
     p.add_argument("log", help="JSONL audit log")
+    p.add_argument("--expected-count", type=int, help="event count stored outside the audit log")
+    p.add_argument("--expected-hash", help="final hash stored outside the audit log")
     p.set_defaults(func=cmd_audit_verify)
 
     return parser

@@ -53,6 +53,9 @@ spark = [
 polars = [
     "polars>=1.0",
 ]
+presidio = [
+    "presidio-analyzer>=2.2,<3",
+]
 parquet = [
     "pyarrow>=14",
 ]
@@ -115,5 +118,5 @@ files = ["src/colgov"]
 warn_unreachable = true
 
 [[tool.mypy.overrides]]
-module = ["pyspark.*", "moto.*", "pyarrow.*"]
+module = ["pyspark.*", "moto.*", "pyarrow.*", "presidio_analyzer.*"]
 ignore_missing_imports = true
