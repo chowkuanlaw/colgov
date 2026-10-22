@@ -1,0 +1,44 @@
+name: Publish GitHub Release 1.2.0
+
+on:
+  push:
+    branches: ["codex/repair-github-release-1.2.0"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download verified PyPI distributions
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          from urllib.request import urlopen
+
+          with urlopen("https://pypi.org/pypi/colgov/1.2.0/json") as response:
+              metadata = json.load(response)
+          if metadata["info"]["version"] != "1.2.0":
+              raise RuntimeError("Unexpected PyPI version")
+          distributions = metadata["urls"]
+          if len(distributions) != 2:
+              raise RuntimeError("Expected a wheel and a source distribution")
+          output = Path("dist")
+          output.mkdir()
+          for distribution in distributions:
+              name = distribution["filename"]
+              if name not in {"colgov-1.2.0-py3-none-any.whl", "colgov-1.2.0.tar.gz"}:
+                  raise RuntimeError(f"Unexpected distribution: {name}")
+              with urlopen(distribution["url"]) as response:
+                  data = response.read()
+              if hashlib.sha256(data).hexdigest() != distribution["digests"]["sha256"]:
+                  raise RuntimeError(f"Digest mismatch: {name}")
+              (output / name).write_bytes(data)
+          PY
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create v1.2.0 dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "colgov 1.2.0"
