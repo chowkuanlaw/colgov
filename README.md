@@ -510,7 +510,6 @@ system. The command generates SQL but does not run it or grant permissions.
 
 **After 1.1**
 
-- [ ] Independent review of the cryptographic design
 - [x] Optional Presidio bridge for whole-value suggestions
 - [x] `colgov report`: catalog coverage, role access and bounded cardinality summary
 - [x] ANSI SQL view generation over pretokenized companion columns

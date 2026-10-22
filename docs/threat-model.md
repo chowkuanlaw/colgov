@@ -104,6 +104,6 @@ These follow from the design. They are not bugs.
 | Token v1 (read-only) | `AES-SIV(v1_domain_key, 0x01 ‖ utf8(value))`, info `colgov/v1/column-key/<domain>` |
 | Master keys | At least 32 bytes from a CSPRNG |
 
-This design has not yet had an independent cryptographic review. One is
-planned, and its findings will be published in the changelog and, where
-they affect security, as a security advisory.
+This design has not yet had an independent cryptographic review. If one is
+completed, its findings will be published in the changelog and, where they
+affect security, as a security advisory.
