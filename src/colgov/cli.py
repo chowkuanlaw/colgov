@@ -43,19 +43,27 @@ import random
 import sys
 from collections import Counter
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, TextIO
+
+import yaml
 
 import colgov
 from colgov._tabular import Row, Source, TabularError, open_sink, open_source
-from colgov.audit import AuditLogError, JsonlAuditLog, _last_hash, record_event, verify_audit_log
+from colgov.access import compare_access, explain_access
+from colgov.audit import AuditLogError, JsonlAuditLog, audit_state, record_event
+from colgov.checkpoint import CheckpointError, load_checkpoint, save_checkpoint
+from colgov.dbt import DbtError, generate_dbt_views, load_dbt_relations
 from colgov.keys import KeySpecError, generate_aws_kms_key, load_keyring
 from colgov.policy import AccessDenied, Policy, PolicyError, Treatment, record_view, summarize
 from colgov.presidio import PresidioBridge, PresidioError
 from colgov.review import Catalog, CatalogError
 from colgov.risk import DEFAULT_MIN_DISTINCT, ColumnRisk, LowCardinalityError
+from colgov.risk_gate import RiskThresholdError, RiskThresholds, profile_columns, risk_violations
+from colgov.rotation import RotationError, preview_rotation
+from colgov.rule_cases import RuleCaseError, load_rule_cases, run_rule_cases
 from colgov.rules import PUBLIC, RulePack, RulePackError, Suggestion
-from colgov.sql import SqlViewError, generate_view_sql
+from colgov.sql import SQL_DIALECTS, SqlViewError, generate_view_sql
 from colgov.tokenization import InvalidToken, Tokenizer
 
 KEY_ENV = "COLGOV_MASTER_KEY"
@@ -63,6 +71,8 @@ KEY_ENV = "COLGOV_MASTER_KEY"
 _ERRORS = (
     AuditLogError,
     CatalogError,
+    CheckpointError,
+    DbtError,
     InvalidToken,
     KeySpecError,
     LowCardinalityError,
@@ -70,6 +80,9 @@ _ERRORS = (
     PolicyError,
     PresidioError,
     RulePackError,
+    RuleCaseError,
+    RiskThresholdError,
+    RotationError,
     SqlViewError,
     TabularError,
     UnicodeDecodeError,
@@ -198,6 +211,51 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy_explain(args: argparse.Namespace) -> int:
+    explanation = explain_access(
+        Policy.load(args.policy), Catalog.load(args.catalog), role=args.role, column=args.column, table=args.table
+    )
+    if args.format == "json":
+        print(json.dumps(asdict(explanation), indent=2))
+    else:
+        where = explanation.column if explanation.table is None else f"{explanation.table}.{explanation.column}"
+        print(f"{where} for {explanation.role}: {explanation.view.value} — {explanation.view_reason}")
+        print(f"detokenize: {explanation.detokenize} — {explanation.detokenize_reason}")
+        if explanation.label is not None:
+            print(f"decision: {explanation.label} by {explanation.decided_by} at {explanation.decided_at}")
+            print(f"token domain: {explanation.domain}")
+    return 0
+
+
+def cmd_policy_diff(args: argparse.Namespace) -> int:
+    schemas: dict[str | None, list[str]] = {}
+    for path in args.schemas:
+        for table, columns in _schema_tables(path, args.table).items():
+            known = schemas.setdefault(table, [])
+            known.extend(column for column in columns if column not in known)
+    changes = compare_access(
+        Policy.load(args.old_policy),
+        Catalog.load(args.old_catalog),
+        Policy.load(args.new_policy),
+        Catalog.load(args.new_catalog),
+        schemas=schemas,
+    )
+    if args.format == "json":
+        print(json.dumps([asdict(change) for change in changes], indent=2))
+    else:
+        for change in changes:
+            where = change.column if change.table is None else f"{change.table}.{change.column}"
+            print(
+                f"{change.kind}: {where} for {change.role}: "
+                f"{change.before.view.value} -> {change.after.view.value}; "
+                f"detokenize {change.before.detokenize} -> {change.after.detokenize}; "
+                f"label {change.before.label or '-'} -> {change.after.label or '-'}; "
+                f"domain {change.before.domain or '-'} -> {change.after.domain or '-'}"
+            )
+        print(f"colgov policy-diff: {len(changes)} change(s)")
+    return int(args.fail_on_expansion and any(change.kind in {"expansion", "mixed"} for change in changes))
+
+
 def cmd_apply(args: argparse.Namespace) -> int:
     """Stream the role's view: one pass to check, one pass to write.
 
@@ -216,8 +274,18 @@ def cmd_apply(args: argparse.Namespace) -> int:
     tokenizer = _tokenizer(args) if tokenized else None
     audit = JsonlAuditLog(args.audit) if args.audit else None
     try:
-        n_rows = _check_rows_and_cardinality(args.data, header, [r.column for r in tokenized], args.min_distinct)
-    except (CliError, LowCardinalityError, TabularError) as exc:
+        thresholds = _risk_thresholds(args)
+        token_columns = [r.column for r in tokenized]
+        if token_columns and (thresholds.max_top_share is not None or thresholds.min_frequency is not None):
+            risks = profile_columns((row for _, row in open_source(args.data).rows(token_columns)), token_columns)
+            n_rows = risks[token_columns[0]].n_rows
+            for column, risk in risks.items():
+                failures = risk_violations(risk, thresholds)
+                if failures:
+                    raise RiskThresholdError(f"column {column!r}: {'; '.join(failures)}")
+        else:
+            n_rows = _check_rows_and_cardinality(args.data, header, token_columns, thresholds.min_distinct)
+    except (CliError, LowCardinalityError, RiskThresholdError, TabularError) as exc:
         if audit is not None:
             record_view(audit, args.actor, args.role, plan, "error", str(exc), 0)
         raise
@@ -316,6 +384,34 @@ def cmd_retokenize(args: argparse.Namespace) -> int:
                 row[i] = new
             write(row)
     print(f"colgov: re-issued {changed} token(s) under key {tokenizer.keyring.primary_id}", file=sys.stderr)
+    return 0
+
+
+def cmd_rotation_preview(args: argparse.Namespace) -> int:
+    source = open_source(args.data)
+    columns = _column_list(args.columns, source.header)
+    _require_strings(source, columns)
+    catalog = Catalog.load(args.catalog) if args.catalog else None
+    domains = {}
+    for column in columns:
+        decision = catalog.get(column, table=args.table) if catalog else None
+        domains[column] = decision.token_domain if decision else column
+    tokenizer = _tokenizer(args)
+    rows = (dict(zip(columns, row, strict=True)) for _, row in source.rows(columns))
+    impact = preview_rotation(rows, domains, tokenizer)
+    if args.format == "json":
+        print(
+            json.dumps(
+                {"primary_key_id": tokenizer.keyring.primary_id, "columns": [asdict(item) for item in impact]}, indent=2
+            )
+        )
+    else:
+        print(f"primary key: {tokenizer.keyring.primary_id}")
+        for item in impact:
+            print(
+                f"{item.column} (domain {item.domain}): {item.reissue} reissue, "
+                f"{item.current} current, {item.null} null"
+            )
     return 0
 
 
@@ -462,6 +558,36 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_risk_check(args: argparse.Namespace) -> int:
+    """Fail CI when exact column profiles exceed configured thresholds."""
+    source = open_source(args.data)
+    columns = _column_list(args.columns, source.header)
+    _require_strings(source, columns)
+    thresholds = _risk_thresholds(args)
+    risks = profile_columns((row for _, row in source.rows(columns)), columns)
+    findings = {column: risk_violations(risk, thresholds) for column, risk in risks.items()}
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "columns": [
+                        {"column": column, "risk": asdict(risk), "violations": findings[column]}
+                        for column, risk in risks.items()
+                    ]
+                },
+                indent=2,
+            )
+        )
+    else:
+        for column, risk in risks.items():
+            result = "PASS" if not findings[column] else "FAIL: " + "; ".join(findings[column])
+            print(
+                f"{column}: {result}; distinct={risk.n_distinct}; "
+                f"top_share={risk.top_share:.4f}; min_frequency={risk.min_frequency}"
+            )
+    return int(any(findings.values()))
+
+
 def cmd_sql_view(args: argparse.Namespace) -> int:
     source = open_source(args.data)
     mappings: dict[str, str] = {}
@@ -484,14 +610,72 @@ def cmd_sql_view(args: argparse.Namespace) -> int:
         view=args.view,
         token_columns=mappings,
         table=args.table,
+        dialect=args.dialect,
     )
     print(sql)
     return 0
 
 
+def cmd_dbt_views(args: argparse.Namespace) -> int:
+    token_columns: dict[str, dict[str, str]] = {}
+    if args.token_map:
+        with open(args.token_map, encoding="utf-8") as file:
+            try:
+                raw = yaml.safe_load(file)
+            except yaml.YAMLError as exc:
+                raise DbtError(f"invalid token map YAML: {exc}") from exc
+        if not isinstance(raw, dict) or set(raw) != {"tables"} or not isinstance(raw["tables"], dict):
+            raise DbtError("token map must contain a 'tables' mapping")
+        token_columns = raw["tables"]
+    relations = load_dbt_relations(args.manifest, args.dbt_catalog)
+    views = generate_dbt_views(
+        relations,
+        Policy.load(args.policy),
+        Catalog.load(args.catalog),
+        role=args.role,
+        view_schema=args.view_schema,
+        token_columns=token_columns,
+        dialect=args.dialect,
+    )
+    for table, sql in views.items():
+        print(f"-- {table}\n{sql}\n")
+    return 0
+
+
+def cmd_rule_test(args: argparse.Namespace) -> int:
+    pack = _pack(args.pack)
+    results = run_rule_cases(pack, load_rule_cases(args.cases))
+    failed = [result for result in results if not result.passed or (args.strict_overlap and result.overlaps)]
+    if args.format == "json":
+        print(
+            json.dumps(
+                [dict(asdict(result), passed=result.passed, overlaps=result.overlaps) for result in results], indent=2
+            )
+        )
+    else:
+        for result in results:
+            passed = result.passed and (not args.strict_overlap or not result.overlaps)
+            overlap = " (overlap)" if result.overlaps else ""
+            print(
+                f"{'PASS' if passed else 'FAIL'} {result.name} [{result.column}]: "
+                f"expected {','.join(result.expected) or '-'}, got {','.join(result.actual) or '-'}{overlap}"
+            )
+        print(f"colgov rules test: {len(results) - len(failed)} passed, {len(failed)} failed")
+    return int(bool(failed))
+
+
+def cmd_audit_checkpoint(args: argparse.Namespace) -> int:
+    checkpoint = save_checkpoint(args.log, args.destination, retention_days=args.retention_days)
+    print(f"saved checkpoint: {checkpoint.count} event(s), final hash {checkpoint.final_hash}")
+    return 0
+
+
 def cmd_audit_verify(args: argparse.Namespace) -> int:
-    count = verify_audit_log(args.log)
-    last_hash = _last_hash(args.log)
+    count, last_hash = audit_state(args.log)
+    if args.checkpoint:
+        checkpoint = load_checkpoint(args.checkpoint)
+        if count != checkpoint.count or last_hash != checkpoint.final_hash:
+            raise CliError("audit log does not match the external checkpoint")
     if args.expected_count is not None and count != args.expected_count:
         raise CliError(f"audit event count {count} does not match expected count {args.expected_count}")
     if args.expected_hash is not None and last_hash != args.expected_hash.lower():
@@ -501,6 +685,22 @@ def cmd_audit_verify(args: argparse.Namespace) -> int:
 
 
 # --- helpers --------------------------------------------------------------------
+
+
+def _column_list(spec: str, header: Sequence[str]) -> list[str]:
+    columns = [column.strip() for column in spec.split(",") if column.strip()]
+    missing = [column for column in columns if column not in header]
+    if not columns or missing or len(set(columns)) != len(columns):
+        detail = f"; not found: {', '.join(missing)}" if missing else ""
+        raise CliError(f"--columns must name unique columns of the data file{detail}")
+    return columns
+
+
+def _risk_thresholds(args: argparse.Namespace) -> RiskThresholds:
+    try:
+        return RiskThresholds(args.min_distinct, args.max_top_share, args.min_frequency)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
 
 
 def _pack(spec: str) -> RulePack:
@@ -726,6 +926,24 @@ def _parser() -> argparse.ArgumentParser:
     policy_args(p)
     table_arg(p)
 
+    p = add("policy-explain", cmd_policy_explain, "explain one column's view and detokenization decision")
+    policy_args(p)
+    table_arg(p)
+    p.add_argument("--column", required=True, help="column to explain")
+    p.add_argument("--format", choices=["text", "json"], default="text")
+
+    p = add("policy-diff", cmd_policy_diff, "compare effective access across policy and catalog revisions")
+    p.add_argument("--old-policy", required=True)
+    p.add_argument("--old-catalog", required=True)
+    p.add_argument("--new-policy", required=True)
+    p.add_argument("--new-catalog", required=True)
+    p.add_argument(
+        "--schema", action="append", dest="schemas", default=[], help="include columns from a data or dbt file"
+    )
+    table_arg(p)
+    p.add_argument("--fail-on-expansion", action="store_true", help="exit 1 if any role gains access")
+    p.add_argument("--format", choices=["text", "json"], default="text")
+
     p = add("apply", cmd_apply, "write the view of a data file that a role may see")
     p.add_argument("data", help="CSV or Parquet file")
     policy_args(p)
@@ -738,6 +956,10 @@ def _parser() -> argparse.ArgumentParser:
         default=colgov.DEFAULT_MIN_DISTINCT,
         help="refuse to tokenize columns with fewer distinct values (default: %(default)s)",
     )
+    p.add_argument(
+        "--max-top-share", type=float, help="refuse a token column if its most common value exceeds this share"
+    )
+    p.add_argument("--min-frequency", type=int, help="refuse a token column if any value occurs fewer times")
     p.add_argument("--audit", help="append a record of this view to a JSONL audit log")
     p.add_argument("--actor", help="who is running this (required with --audit)")
 
@@ -759,6 +981,14 @@ def _parser() -> argparse.ArgumentParser:
     table_arg(p)
     key_args(p)
     p.add_argument("-o", "--output", default="-", help="output file, CSV or .parquet (default: CSV to stdout)")
+
+    p = add("rotation-preview", cmd_rotation_preview, "count tokens needing reissue without changing data")
+    p.add_argument("data", help="CSV or Parquet file containing tokens")
+    p.add_argument("--columns", required=True, help="comma-separated token columns")
+    p.add_argument("-c", "--catalog", help="catalog YAML, for token domains")
+    table_arg(p)
+    key_args(p)
+    p.add_argument("--format", choices=["text", "json"], default="text")
 
     p = add("check", cmd_check, "fail if any column in a schema has not been reviewed (for CI)")
     p.add_argument(
@@ -786,12 +1016,21 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--min-distinct", type=int, default=DEFAULT_MIN_DISTINCT, help="cardinality threshold (default: 10)")
     p.add_argument("--format", choices=["text", "json"], default="text")
 
-    p = add("sql-view", cmd_sql_view, "generate an ANSI SQL view over raw and pretokenized columns")
+    p = add("risk-check", cmd_risk_check, "fail CI when exact column risk exceeds configured thresholds")
+    p.add_argument("data", help="CSV or Parquet data file")
+    p.add_argument("--columns", required=True, help="comma-separated columns to profile")
+    p.add_argument("--min-distinct", type=int, default=DEFAULT_MIN_DISTINCT)
+    p.add_argument("--max-top-share", type=float)
+    p.add_argument("--min-frequency", type=int)
+    p.add_argument("--format", choices=["text", "json"], default="text")
+
+    p = add("sql-view", cmd_sql_view, "generate a SQL view over raw and pretokenized columns")
     p.add_argument("data", help="CSV or Parquet file with the source table's column names")
     policy_args(p)
     table_arg(p)
     p.add_argument("--source", required=True, help="qualified source table name")
     p.add_argument("--view", required=True, help="qualified view name")
+    p.add_argument("--dialect", choices=SQL_DIALECTS, default="ansi")
     p.add_argument(
         "--token-column",
         action="append",
@@ -800,13 +1039,37 @@ def _parser() -> argparse.ArgumentParser:
         help="pretokenized source column for a logical column; repeat as needed",
     )
 
+    p = add("dbt-views", cmd_dbt_views, "generate governed views from dbt manifest and catalog artifacts")
+    p.add_argument("--manifest", required=True, help="dbt manifest.json")
+    p.add_argument("--dbt-catalog", required=True, help="dbt catalog.json with complete source columns")
+    policy_args(p)
+    p.add_argument("--view-schema", required=True, help="schema or dataset for generated views")
+    p.add_argument("--token-map", help="YAML tables mapping of logical to pretokenized source columns")
+    p.add_argument("--dialect", choices=SQL_DIALECTS, default="ansi")
+
+    rules = sub.add_parser("rules", help="rule pack tools", description="rule pack tools")
+    rules_sub = rules.add_subparsers(dest="rules_command", required=True, metavar="COMMAND")
+    p = rules_sub.add_parser("test", help="run example cases against a rule pack")
+    p.add_argument("cases", help="YAML file with a cases list")
+    p.add_argument("--pack", required=True, help="built-in name or rule pack YAML path")
+    p.add_argument("--strict-overlap", action="store_true", help="fail if a case suggests more than one label")
+    p.add_argument("--format", choices=["text", "json"], default="text")
+    p.set_defaults(func=cmd_rule_test)
+
     audit = sub.add_parser("audit", help="audit log tools", description="audit log tools")
     audit_sub = audit.add_subparsers(dest="audit_command", required=True, metavar="COMMAND")
     p = audit_sub.add_parser("verify", help="check an audit log's hash chain")
     p.add_argument("log", help="JSONL audit log")
     p.add_argument("--expected-count", type=int, help="event count stored outside the audit log")
     p.add_argument("--expected-hash", help="final hash stored outside the audit log")
+    p.add_argument("--checkpoint", help="external checkpoint file or s3://bucket/key")
     p.set_defaults(func=cmd_audit_verify)
+
+    p = audit_sub.add_parser("checkpoint", help="write a verified hash checkpoint outside the audit log")
+    p.add_argument("log", help="JSONL audit log")
+    p.add_argument("destination", help="new checkpoint file or s3://bucket/key")
+    p.add_argument("--retention-days", type=int, help="S3 Object Lock compliance retention in days")
+    p.set_defaults(func=cmd_audit_checkpoint)
 
     return parser
 

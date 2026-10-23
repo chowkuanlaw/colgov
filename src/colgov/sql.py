@@ -12,7 +12,9 @@ from collections.abc import Mapping, Sequence
 from colgov.policy import Policy, Treatment
 from colgov.review import Catalog
 
-__all__ = ["SqlViewError", "generate_view_sql"]
+__all__ = ["SQL_DIALECTS", "SqlViewError", "generate_view_sql"]
+
+SQL_DIALECTS = ("ansi", "postgres", "snowflake", "bigquery")
 
 
 class SqlViewError(ValueError):
@@ -29,8 +31,9 @@ def generate_view_sql(
     view: str,
     token_columns: Mapping[str, str],
     table: str | None = None,
+    dialect: str = "ansi",
 ) -> str:
-    """Return a ``CREATE VIEW`` statement using ANSI quoted identifiers.
+    """Return a ``CREATE VIEW`` statement for the selected SQL dialect.
 
     ``columns`` are the physical source columns, including any pretokenized
     companions. ``token_columns`` maps a logical column to its token column.
@@ -41,6 +44,8 @@ def generate_view_sql(
     does not tokenize data, validate tokens, check cardinality, or grant SQL
     permissions. Its token columns must be populated separately with colgov.
     """
+    if dialect not in SQL_DIALECTS:
+        raise SqlViewError(f"unsupported SQL dialect {dialect!r}")
     physical = list(columns)
     if len(set(physical)) != len(physical) or any(not isinstance(c, str) or not c for c in physical):
         raise SqlViewError("physical column names must be unique, non-empty strings")
@@ -63,28 +68,30 @@ def generate_view_sql(
     selected = []
     for resolution in policy.plan(role, logical_columns, catalog, table=table):
         if resolution.treatment is Treatment.CLEAR:
-            selected.append(_identifier(resolution.column))
+            selected.append(_identifier(resolution.column, dialect))
         elif resolution.treatment is Treatment.TOKENIZE:
             mapped_token = token_columns.get(resolution.column)
             if mapped_token is None:
                 raise SqlViewError(f"column {resolution.column!r} needs a pretokenized source column")
-            selected.append(f"{_identifier(mapped_token)} AS {_identifier(resolution.column)}")
+            selected.append(f"{_identifier(mapped_token, dialect)} AS {_identifier(resolution.column, dialect)}")
     if not selected:
         raise SqlViewError(f"role {role!r} has no visible columns")
-    source_name = _qualified_identifier(source)
-    view_name = _qualified_identifier(view)
+    source_name = _qualified_identifier(source, dialect)
+    view_name = _qualified_identifier(view, dialect)
     if source_name == view_name:
         raise SqlViewError("source and view must differ")
     return f"CREATE VIEW {view_name} AS\nSELECT\n  " + ",\n  ".join(selected) + f"\nFROM {source_name};"
 
 
-def _identifier(name: str) -> str:
+def _identifier(name: str, dialect: str) -> str:
     if not isinstance(name, str) or not name or "\x00" in name:
         raise SqlViewError("SQL identifiers must be non-empty and cannot contain NUL")
+    if dialect == "bigquery":
+        return "`" + name.replace("\\", "\\\\").replace("`", "\\`") + "`"
     return '"' + name.replace('"', '""') + '"'
 
 
-def _qualified_identifier(name: str) -> str:
+def _qualified_identifier(name: str, dialect: str) -> str:
     if not isinstance(name, str):
         raise SqlViewError("SQL table names must be strings")
-    return ".".join(_identifier(part) for part in name.split("."))
+    return ".".join(_identifier(part, dialect) for part in name.split("."))
