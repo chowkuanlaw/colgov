@@ -37,7 +37,7 @@ from colgov.rules import PUBLIC, Label, Rule, RulePack, RulePackError, Suggestio
 from colgov.sql import SQL_DIALECTS, SqlViewError, generate_view_sql
 from colgov.tokenization import MIN_MASTER_KEY_BYTES, InvalidToken, Keyring, Tokenizer
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __all__ = [
     "DEFAULT_MIN_DISTINCT",
     "MIN_MASTER_KEY_BYTES",

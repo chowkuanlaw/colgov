@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.3.0 — 2026-10-23
+
 - Added `policy-diff` and `policy-explain` for effective role access changes
   and individual access decisions; `--fail-on-expansion` gates CI.
 - Added exact, bounded-memory `risk-check` thresholds for distinct count,
