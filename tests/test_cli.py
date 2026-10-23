@@ -833,6 +833,155 @@ def test_check_dbt_with_table_is_an_error(tmp_path, capsys):
     assert code == 1 and "--table can't be used with a dbt file" in err
 
 
+def test_policy_explain_and_diff_commands(workdir, capsys):
+    code, out, _ = run(
+        capsys, "policy-explain", *POLICY_ARGS, "--role", "analyst", "--column", "customer_email", "--format", "json"
+    )
+    assert code == 0
+    explanation = json.loads(out)
+    assert explanation["view"] == "tokenize" and explanation["decided_by"] == "alice"
+    (workdir / "new-policy.yaml").write_text(
+        "roles: {analyst: {email: clear}, support: {email: {view: clear, detokenize: true}}}\n"
+    )
+    code, out, _ = run(
+        capsys,
+        "policy-diff",
+        "--old-policy",
+        "policy.yaml",
+        "--old-catalog",
+        "catalog.yaml",
+        "--new-policy",
+        "new-policy.yaml",
+        "--new-catalog",
+        "catalog.yaml",
+        "--fail-on-expansion",
+        "--format",
+        "json",
+    )
+    assert code == 1
+    changes = json.loads(out)
+    assert len(changes) == 1 and changes[0]["kind"] == "expansion"
+    assert changes[0]["column"] == "customer_email"
+
+
+def test_risk_check_and_apply_gate(workdir, capsys):
+    code, out, _ = run(capsys, "risk-check", "data.csv", "--columns", "customer_email", "--max-top-share", "0.04")
+    assert code == 1 and "FAIL" in out
+    code, out, _ = run(capsys, "risk-check", "data.csv", "--columns", "customer_email", "--max-top-share", "0.05")
+    assert code == 0 and "PASS" in out
+    code, _, err = run(
+        capsys, "apply", "data.csv", *POLICY_ARGS, "--role", "analyst", "-o", "blocked.csv", "--max-top-share", "0.04"
+    )
+    assert code == 1 and "top share" in err
+    assert not (workdir / "blocked.csv").exists()
+
+
+def test_sql_dialect_and_dbt_views_commands(workdir, capsys):
+    (workdir / "schema.csv").write_text("customer_email,customer_email_token\n")
+    code, out, _ = run(
+        capsys,
+        "sql-view",
+        "schema.csv",
+        *POLICY_ARGS,
+        "--role",
+        "analyst",
+        "--source",
+        "project.raw.people",
+        "--view",
+        "project.safe.people",
+        "--token-column",
+        "customer_email=customer_email_token",
+        "--dialect",
+        "bigquery",
+    )
+    assert code == 0 and "`customer_email_token` AS `customer_email`" in out
+    manifest = {
+        "metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json"},
+        "nodes": {
+            "model.shop.customers": {"name": "customers", "database": "project", "schema": "raw", "alias": "people"}
+        },
+    }
+    physical = {
+        "metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/catalog/v1.json"},
+        "nodes": {
+            "model.shop.customers": {
+                "columns": {
+                    "customer_email": {"name": "customer_email"},
+                    "customer_email_token": {"name": "customer_email_token"},
+                }
+            }
+        },
+    }
+    (workdir / "manifest.json").write_text(json.dumps(manifest))
+    (workdir / "dbt-catalog.json").write_text(json.dumps(physical))
+    (workdir / "token-map.yaml").write_text("tables:\n  customers:\n    customer_email: customer_email_token\n")
+    catalog = Catalog()
+    catalog.decide("customer_email", "email", by="alice", table="customers")
+    catalog.save(workdir / "dbt-colgov.yaml")
+    code, out, _ = run(
+        capsys,
+        "dbt-views",
+        "--manifest",
+        "manifest.json",
+        "--dbt-catalog",
+        "dbt-catalog.json",
+        "-p",
+        "policy.yaml",
+        "-c",
+        "dbt-colgov.yaml",
+        "--role",
+        "analyst",
+        "--view-schema",
+        "safe",
+        "--token-map",
+        "token-map.yaml",
+        "--dialect",
+        "bigquery",
+    )
+    assert code == 0 and "`project`.`safe`.`people`" in out
+
+
+def test_rotation_preview_command(workdir, capsys):
+    old_key = bytes(range(32))
+    new_key = bytes(range(32, 64))
+    (workdir / "keys.txt").write_text(base64.b64encode(new_key).decode() + "\n" + base64.b64encode(old_key).decode())
+    old_token = Tokenizer(old_key).tokenize("a@example.com", column="customer_email")
+    new_token = Tokenizer(new_key).tokenize("b@example.com", column="customer_email")
+    (workdir / "tokens.csv").write_text("customer_email\n" + old_token + "\n" + new_token + "\n")
+    code, out, _ = run(
+        capsys,
+        "rotation-preview",
+        "tokens.csv",
+        "--columns",
+        "customer_email",
+        "--key-file",
+        "keys.txt",
+        "--format",
+        "json",
+    )
+    assert code == 0
+    assert json.loads(out)["columns"][0]["reissue"] == 1
+
+
+def test_rules_test_and_audit_checkpoint_commands(workdir, capsys):
+    from colgov import AuditEvent, JsonlAuditLog
+
+    (workdir / "cases.yaml").write_text(
+        "cases:\n  - {name: email, column: email, values: [a@example.com], expected: [email]}\n"
+    )
+    code, out, _ = run(capsys, "rules", "test", "cases.yaml", "--pack", "core")
+    assert code == 0 and "1 passed" in out
+    log = JsonlAuditLog("audit.jsonl")
+    log.record(AuditEvent("alice", "support", "detokenize", "allowed", ("customer_email",), "test"))
+    code, out, _ = run(capsys, "audit", "checkpoint", "audit.jsonl", "checkpoint.json")
+    assert code == 0 and "saved checkpoint" in out
+    code, out, _ = run(capsys, "audit", "verify", "audit.jsonl", "--checkpoint", "checkpoint.json")
+    assert code == 0 and "hash chain intact" in out
+    log.record(AuditEvent("alice", "support", "detokenize", "allowed", ("customer_email",), "test"))
+    code, _, err = run(capsys, "audit", "verify", "audit.jsonl", "--checkpoint", "checkpoint.json")
+    assert code == 1 and "does not match" in err
+
+
 # --- Parquet ----------------------------------------------------------------------
 
 

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.3.0 — 2026-10-23
+
+- Added `policy-diff` and `policy-explain` for effective role access changes
+  and individual access decisions; `--fail-on-expansion` gates CI.
+- Added exact, bounded-memory `risk-check` thresholds for distinct count,
+  top-value share and minimum value frequency. `apply` accepts the latter
+  two limits as pre-output gates.
+- SQL views now support PostgreSQL, Snowflake and BigQuery dialects, and
+  `dbt-views` generates governed views from a manifest plus a complete dbt
+  catalog artifact.
+- Added external audit checkpoints, including conditional S3 writes and
+  optional Object Lock retention, plus checkpoint verification.
+- Added `rotation-preview` for authenticated counts of tokens requiring
+  reissue, and `rules test` for rule-pack examples and overlap checks.
+
 ## 1.2.0 — 2026-10-22
 
 - Added an optional Presidio adapter for whole-value classification

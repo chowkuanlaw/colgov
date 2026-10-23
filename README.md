@@ -449,7 +449,7 @@ it. It never includes data values or tokens.
 
 ### Generating a SQL view
 
-`colgov sql-view` emits an ANSI `CREATE VIEW` statement from a policy and
+`colgov sql-view` emits a `CREATE VIEW` statement from a policy and
 catalog. The source table must already contain a separate token column for
 every logical column treated as `tokenize`; provide each pairing with
 `--token-column`. The generator refuses a tokenized treatment without one.
@@ -459,7 +459,8 @@ Denied and unreviewed columns are omitted.
 colgov sql-view customers.parquet -p policy.yaml -c catalog.yaml \
   --role analyst --table customers \
   --source warehouse.customers --view analytics.analyst_customers \
-  --token-column customer_email=customer_email_token > analyst_view.sql
+  --token-column customer_email=customer_email_token \
+  --dialect postgres > analyst_view.sql
 ```
 
 The input file supplies the source table's column names, including token
@@ -469,6 +470,89 @@ token column under its logical name; it does not encrypt inside SQL. Check
 cardinality before producing tokens. Restrict direct access to the source
 table and grant access to the generated view with your warehouse's permission
 system. The command generates SQL but does not run it or grant permissions.
+
+### Reviewing policy changes
+
+`policy-explain` shows the reviewed label, reviewer, token domain, view
+treatment and separate detokenization decision for one role and column.
+`policy-diff` compares effective access across two policy and catalog
+revisions. It reports access expansions, restrictions and configuration
+changes such as a token-domain change. Pass `--fail-on-expansion` in CI.
+
+```bash
+colgov policy-explain -p policy.yaml -c catalog.yaml --role analyst \
+  --table customers --column customer_email
+colgov policy-diff --old-policy old-policy.yaml --old-catalog old-catalog.yaml \
+  --new-policy policy.yaml --new-catalog catalog.yaml --fail-on-expansion
+```
+
+### Enforcing risk thresholds
+
+`risk-check` scans selected string columns exactly and exits 1 when a
+threshold fails. Its temporary SQLite database contains keyed digests and
+counts, never source values. `--min-distinct` defaults to 10. Use
+`--max-top-share` and `--min-frequency` for further limits. `apply` accepts
+the latter two flags too and checks tokenized columns before writing output.
+
+```bash
+colgov risk-check customers.csv --columns customer_email \
+  --min-distinct 10 --max-top-share 0.2 --min-frequency 2
+```
+
+### Generating dbt views
+
+`dbt-views` combines `manifest.json` with the complete `catalog.json` from
+`dbt docs generate`. It refuses missing physical columns or unreviewed
+logical columns. A token map names pretokenized companion columns for each
+dbt model. Output is SQL only; restrict direct source-table access yourself.
+
+```yaml
+# token-map.yaml
+tables:
+  customers:
+    customer_email: customer_email_token
+```
+
+```bash
+colgov dbt-views --manifest target/manifest.json --dbt-catalog target/catalog.json \
+  -p policy.yaml -c catalog.yaml --role analyst --view-schema governed \
+  --token-map token-map.yaml --dialect bigquery > governed_views.sql
+```
+
+### Audit checkpoints, rotation preview and rule tests
+
+Save a verified audit count and final hash outside the log, then compare it
+later. S3 checkpoint writes use a create-only request. For immutable S3
+checkpoints, configure an Object Lock bucket and pass `--retention-days`.
+
+```bash
+colgov audit checkpoint audit.jsonl s3://my-audit-bucket/checkpoints/run-001.json \
+  --retention-days 90
+colgov audit verify audit.jsonl --checkpoint s3://my-audit-bucket/checkpoints/run-001.json
+colgov rotation-preview analyst.csv --columns customer_email -c catalog.yaml \
+  --table customers --format json
+```
+
+`rotation-preview` authenticates each token and counts current and older
+tokens without writing a migrated file or printing plaintext. A keyring
+with the new primary key and all relevant older keys is required.
+
+`rules test` checks example cases for a built-in or YAML rule pack. The
+output contains label names but never sample values. Add
+`--strict-overlap` to fail cases that suggest several labels.
+
+```yaml
+# rule-cases.yaml
+cases:
+  - name: email-example
+    column: contact_email
+    values: [person@example.com]
+    expected: [email]
+```
+
+```bash
+colgov rules test rule-cases.yaml --pack core --strict-overlap
+```
 
 ## Roadmap
 

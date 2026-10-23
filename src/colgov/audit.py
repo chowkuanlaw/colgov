@@ -37,6 +37,7 @@ __all__ = [
     "LoggingAuditLog",
     "MemoryAuditLog",
     "MultiAuditLog",
+    "audit_state",
     "verify_audit_log",
 ]
 
@@ -169,6 +170,11 @@ def verify_audit_log(path: str | PathLike[str]) -> int:
 
     Raises :class:`AuditLogError` naming the first line that fails.
     """
+    return audit_state(path)[0]
+
+
+def audit_state(path: str | PathLike[str]) -> tuple[int, str]:
+    """Verify a log and return its count and final hash from one read pass."""
     prev = _GENESIS
     count = 0
     with open(path, encoding="utf-8") as f:
@@ -187,7 +193,7 @@ def verify_audit_log(path: str | PathLike[str]) -> int:
                 raise AuditLogError(f"line {lineno}: hash mismatch (the line was modified)")
             prev = entry["hash"]
             count += 1
-    return count
+    return count, prev
 
 
 def record_event(
