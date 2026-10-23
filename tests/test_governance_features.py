@@ -13,7 +13,7 @@ from colgov import (
     Treatment,
 )
 from colgov.access import compare_access, explain_access
-from colgov.checkpoint import CheckpointError, load_checkpoint, save_checkpoint
+from colgov.checkpoint import AuditCheckpoint, CheckpointError, load_checkpoint, save_checkpoint
 from colgov.dbt import DbtError, generate_dbt_views, load_dbt_relations
 from colgov.risk_gate import RiskThresholds, profile_columns, risk_violations
 from colgov.rotation import RotationError, preview_rotation
@@ -257,3 +257,31 @@ def test_audit_checkpoint_local_and_s3(tmp_path):
     destination.write_text("{}")
     with pytest.raises(CheckpointError, match="checkpoint must have"):
         load_checkpoint(destination)
+
+
+def test_audit_checkpoint_rejects_tampering_and_invalid_destinations(tmp_path):
+    path = _log(tmp_path)
+    baseline = save_checkpoint(path, tmp_path / "baseline.json").to_dict()
+    altered = [
+        ({**baseline, "version": 2}, "version or count"),
+        ({**baseline, "count": -1}, "version or count"),
+        ({**baseline, "final_hash": "0" * 64 + "x"}, "final_hash"),
+        ({**baseline, "created_at": "2026-01-01T00:00:00"}, "timezone"),
+        ({**baseline, "created_at": 1}, "ISO 8601"),
+    ]
+    for document, message in altered:
+        with pytest.raises(CheckpointError, match=message):
+            AuditCheckpoint.from_dict(document)
+    with pytest.raises(CheckpointError, match="positive"):
+        save_checkpoint(path, tmp_path / "negative.json", retention_days=0)
+    with pytest.raises(CheckpointError, match="S3 checkpoint URI"):
+        save_checkpoint(path, "s3://bucket?query=bad")
+
+    oversized = tmp_path / "oversized.json"
+    oversized.write_bytes(b"{" + b" " * 4097 + b"}")
+    with pytest.raises(CheckpointError, match="too large"):
+        load_checkpoint(oversized)
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{not-json")
+    with pytest.raises(CheckpointError, match="not valid JSON"):
+        load_checkpoint(invalid)
